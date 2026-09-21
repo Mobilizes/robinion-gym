@@ -110,6 +110,29 @@ uv run isaaclab --editor --isaac_path <isaac-sim-path>
 
 ## Troubleshooting
 
+### Isaac Sim / PhysX backend fails with a `pxr` (OpenUSD) error
+
+Running the `isaacsim` backend directly can fail during Kit startup with:
+
+```text
+RuntimeError: extension class wrapper for base class pxrInternal_v0_25_11__pxrReserved__::TfNotice has not been created yet
+...
+TypeError: No to_python (by-value) converter found for C++ type: std::vector<pxrInternal_v0_25_11__pxrReserved__::SdfPath, ...>
+```
+
+This is an upstream version conflict: `isaacsim 6.1.0.0` bundles OpenUSD 25.11, while the pinned `usd-exchange 2.3.0`
+vendors OpenUSD 25.05. Both provide a namespace `pxr` package, so Python merges them and loads a mix of the two USD
+runtimes. Use the `isaaclab.sh` wrapper, which puts Isaac Sim's bundled `pxr` ahead of the standalone one:
+
+```bash
+./isaaclab.sh random_agent --task RobinionGym-Velocity-Robinion --physics=isaacsim_physx
+```
+
+The wrapper is a local workaround for this repository's environment. Remove it once Isaac Lab pins a USD provider that
+matches Isaac Sim's bundled OpenUSD version.
+
+### Editor cannot resolve modules
+
 If Pylance or basedpyright cannot resolve modules, confirm that the selected interpreter matches the one used to run the
 setup command, then reload the editor window. To add a missing extension or reduce indexing memory, edit the `extraPaths`
 array in the root `pyrightconfig.json`; remove simulator extension directories that the project does not use.

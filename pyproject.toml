@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 isaacsim = ["isaaclab-dev[isaacsim]"]
+video = ["isaaclab-dev[video]"]
 ov = ["isaaclab-dev[ov]"]
 ovphysx = ["isaaclab-dev[ovphysx]"]
 ovrtx = ["isaaclab-dev[ovrtx]"]
@@ -40,6 +41,7 @@ environments = [
     "sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
 override-dependencies = [
+    "decorator<5",
     "numpy>=2",
     "mujoco~=3.11.0",
     "mujoco-warp~=3.11.0",
@@ -116,6 +118,10 @@ docstring-code-format = true
 [tool.pyright]
 include = ["src", "scripts", "tests"]
 exclude = ["**/__pycache__", "**/logs", ".git", ".venv", ".vscode"]
+# Make the editable Isaac Lab source packages resolvable by Pylance / basedpyright
+# without relying on the editable-install finder, so re-exported terms such as
+# ``mdp.base_height_l2`` resolve through ``from isaaclab.envs.mdp import *``.
+extraPaths = ["../../IsaacLab/source/*"]
 typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
