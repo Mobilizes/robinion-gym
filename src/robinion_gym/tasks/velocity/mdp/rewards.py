@@ -198,4 +198,4 @@ def feet_distance(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntit
         - torch.sin(base_yaw) * (feet_pos[:, 1, 0] - feet_pos[:, 0, 0])
     )
 
-    return torch.clip(0.25 - feet_distance, min=0.0, max=0.1)
+    return torch.clip(0.1 - feet_distance, min=0.0, max=0.1)

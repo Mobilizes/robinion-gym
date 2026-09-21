@@ -5,15 +5,12 @@
 
 import math
 
-from isaaclab.envs.mdp import (
-    joint_pos_rel,
-    projected_gravity,
-    time_out,
-)
-from isaaclab.sensors import ContactSensorCfg
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.envs.mdp import (
+    projected_gravity,
+)
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -21,74 +18,15 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.actuators import DCMotorCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab_physx.physics import PhysxCfg
 
 from isaaclab_tasks.utils import PresetCfg
 
+from robinion_gym.robots import ROBINION_CFG
+
 from . import mdp
-
-##
-# Pre-defined configs
-##
-
-# Joint groups are taken from the robinion2 USD effort/velocity limits. Gains are scaled by
-# each group's rated torque so weak joints (head, hip/elbow yaw: 4.1 N.m) do not saturate on
-# tiny position errors while strong leg joints (thigh/knee: 19.8 N.m) stay stiff enough to
-# support the body. Damping is kept near stiffness/20 for well-damped position control.
-EFFORT_LIMIT = {
-    ".*thigh.*": 19.8,
-    ".*knee.*": 19.8,
-    ".*hip_roll.*": 9.9,
-    ".*shin.*": 9.9,
-    ".*ankle.*": 9.9,
-    "torso.*": 10.6,
-    ".*shoulder.*": 10.6,
-    ".*elbow_pitch.*": 10.6,
-    ".*hip_yaw.*": 4.1,
-    ".*elbow_yaw.*": 4.1,
-    ".*head.*": 4.1,
-}
-VELOCITY_LIMIT = {
-    ".*thigh.*": 4.08,
-    ".*knee.*": 4.08,
-    ".*hip_roll.*": 4.08,
-    ".*shin.*": 4.08,
-    ".*ankle.*": 4.08,
-    "torso.*": 3.14,
-    ".*shoulder.*": 3.14,
-    ".*elbow_pitch.*": 3.14,
-    ".*hip_yaw.*": 4.82,
-    ".*elbow_yaw.*": 4.82,
-    ".*head.*": 4.82,
-}
-STIFFNESS = {
-    ".*thigh.*": 100.0,
-    ".*knee.*": 100.0,
-    ".*hip_roll.*": 60.0,
-    ".*shin.*": 60.0,
-    ".*ankle.*": 60.0,
-    "torso.*": 80.0,
-    ".*shoulder.*": 50.0,
-    ".*elbow_pitch.*": 50.0,
-    ".*hip_yaw.*": 20.0,
-    ".*elbow_yaw.*": 20.0,
-    ".*head.*": 20.0,
-}
-DAMPING = {
-    ".*thigh.*": 5.0,
-    ".*knee.*": 5.0,
-    ".*hip_roll.*": 3.0,
-    ".*shin.*": 3.0,
-    ".*ankle.*": 3.0,
-    "torso.*": 4.0,
-    ".*shoulder.*": 2.5,
-    ".*elbow_pitch.*": 2.5,
-    ".*hip_yaw.*": 1.0,
-    ".*elbow_yaw.*": 1.0,
-    ".*head.*": 1.0,
-}
 
 ##
 # Physics presets
@@ -119,32 +57,7 @@ class RobinionVelocitySceneCfg(InteractiveSceneCfg):
     )
 
     # robot
-    robot: ArticulationCfg = ArticulationCfg(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/tkuai/isaaclab_projects/robinion_gym/robinion.usd/robinion2/robinion2.usda",
-            activate_contact_sensors=True,
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.6),
-            joint_pos={
-                ".*_shoulder_roll_joint": -1.4,
-                ".*shoulder_pitch_joint": 0.4,
-                # "left_hip_yaw_joint": -0.5,
-            },
-        ),
-        actuators={
-            "body": DCMotorCfg(
-                joint_names_expr=".*",
-                actuator_effort_limit=EFFORT_LIMIT,
-                saturation_effort=EFFORT_LIMIT,
-                actuator_velocity_limit=VELOCITY_LIMIT,
-                stiffness=STIFFNESS,
-                damping=DAMPING,
-                armature={".*": 0.01},
-            )
-        },
-    )
+    robot: ArticulationCfg = ROBINION_CFG
 
     # lights
     dome_light = AssetBaseCfg(
@@ -153,9 +66,7 @@ class RobinionVelocitySceneCfg(InteractiveSceneCfg):
     )
 
     # sensors
-    contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
-    )
+    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
 
 
 ##
@@ -169,7 +80,7 @@ class ActionsCfg:
 
     joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
-        joint_names=[".*"],
+        joint_names=["^(?!head).*"],
         scale=2.0,
         use_default_offset=True,
     )
@@ -207,14 +118,10 @@ class ObservationsCfg:
         # base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
         projected_gravity = ObsTerm(func=projected_gravity)
-        velocity_commands = ObsTerm(
-            func=mdp.generated_commands, params={"command_name": "base_velocity"}
-        )
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1)
-        gait_phase = ObsTerm(
-            func=mdp.gait_phase, params={"period": 0.5, "offset": [0.0, 0.5]}
-        )
+        gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.5, "offset": [0.0, 0.5]})
         last_action = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self) -> None:
@@ -231,14 +138,10 @@ class ObservationsCfg:
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
         projected_gravity = ObsTerm(func=projected_gravity)
-        velocity_commands = ObsTerm(
-            func=mdp.generated_commands, params={"command_name": "base_velocity"}
-        )
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1)
-        gait_phase = ObsTerm(
-            func=mdp.gait_phase, params={"period": 0.5, "offset": [0.0, 0.5]}
-        )
+        gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.5, "offset": [0.0, 0.5]})
         last_action = ObsTerm(func=mdp.last_action)
 
     # privileged observations
@@ -372,7 +275,7 @@ class RewardsCfg:
     pen_base_height = RewTerm(
         func=mdp.base_height_l2,
         weight=-10.0,
-        params={"target_height": 0.6},
+        params={"target_height": 0.60},
     )
     pen_lin_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     pen_ang_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
@@ -390,9 +293,7 @@ class RewardsCfg:
     pen_arm_vel = RewTerm(
         func=mdp.joint_vel_l2,
         weight=-0.003,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*")
-        },
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*")},
     )
     # pen_foot_vel = RewTerm(
     #     func=mdp.joint_vel_l2,
@@ -412,9 +313,7 @@ class RewardsCfg:
     pen_arm_deviation = RewTerm(
         func=mdp.joint_deviation_l2,
         weight=-1.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*")
-        },
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*")},
     )
     pen_dof_action_limit = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
     pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
@@ -459,9 +358,7 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     term_timeout = DoneTerm(func=mdp.time_out, time_out=True)
-    term_height = DoneTerm(
-        func=mdp.root_height_below_minimum, params={"minimum_height": 0.2}
-    )
+    term_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.2})
 
 
 ##
@@ -472,9 +369,7 @@ class TerminationsCfg:
 @configclass
 class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: RobinionVelocitySceneCfg = RobinionVelocitySceneCfg(
-        num_envs=4096, env_spacing=4.0
-    )
+    scene: RobinionVelocitySceneCfg = RobinionVelocitySceneCfg(num_envs=4096, env_spacing=4.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

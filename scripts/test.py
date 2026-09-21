@@ -31,75 +31,13 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import math
 
-import torch
 import isaaclab.sim as sim_utils
-from isaaclab.sim import SimulationCfg, SimulationContext
 from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.actuators import DCMotorCfg
+from isaaclab.sim import SimulationCfg, SimulationContext
 
-from isaaclab_assets.robots.humanoid import HUMANOID_CFG
-
-from isaaclab.utils.math import euler_xyz_from_quat
-
-# Joint groups are taken from the robinion2 USD effort/velocity limits. Gains are scaled by
-# each group's rated torque so weak joints (head, hip/elbow yaw: 4.1 N.m) do not saturate on
-# tiny position errors while strong leg joints (thigh/knee: 19.8 N.m) stay stiff enough to
-# support the body. Damping is kept near stiffness/20 for well-damped position control.
-EFFORT_LIMIT = {
-    ".*thigh.*": 19.8,
-    ".*knee.*": 19.8,
-    ".*hip_roll.*": 9.9,
-    ".*shin.*": 9.9,
-    ".*ankle.*": 9.9,
-    "torso.*": 10.6,
-    ".*shoulder.*": 10.6,
-    ".*elbow_pitch.*": 10.6,
-    ".*hip_yaw.*": 4.1,
-    ".*elbow_yaw.*": 4.1,
-    ".*head.*": 4.1,
-}
-VELOCITY_LIMIT = {
-    ".*thigh.*": 4.08,
-    ".*knee.*": 4.08,
-    ".*hip_roll.*": 4.08,
-    ".*shin.*": 4.08,
-    ".*ankle.*": 4.08,
-    "torso.*": 3.14,
-    ".*shoulder.*": 3.14,
-    ".*elbow_pitch.*": 3.14,
-    ".*hip_yaw.*": 4.82,
-    ".*elbow_yaw.*": 4.82,
-    ".*head.*": 4.82,
-}
-STIFFNESS = {
-    ".*thigh.*": 100.0,
-    ".*knee.*": 100.0,
-    ".*hip_roll.*": 60.0,
-    ".*shin.*": 60.0,
-    ".*ankle.*": 60.0,
-    "torso.*": 80.0,
-    ".*shoulder.*": 50.0,
-    ".*elbow_pitch.*": 50.0,
-    ".*hip_yaw.*": 20.0,
-    ".*elbow_yaw.*": 20.0,
-    ".*head.*": 20.0,
-}
-DAMPING = {
-    ".*thigh.*": 5.0,
-    ".*knee.*": 5.0,
-    ".*hip_roll.*": 3.0,
-    ".*shin.*": 3.0,
-    ".*ankle.*": 3.0,
-    "torso.*": 4.0,
-    ".*shoulder.*": 2.5,
-    ".*elbow_pitch.*": 2.5,
-    ".*hip_yaw.*": 1.0,
-    ".*elbow_yaw.*": 1.0,
-    ".*head.*": 1.0,
-}
+from robinion_gym.robots import ROBINION_CFG
 
 
 class NewRobotSceneCfg(InteractiveSceneCfg):
@@ -109,34 +47,7 @@ class NewRobotSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=3000, color=(0.75, 0.75, 0.75)),
     )
 
-    robot: ArticulationCfg = ArticulationCfg(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/tkuai/isaaclab_projects/robinion_gym/robinion.usd/robinion2/robinion2.usda"
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.6),
-            joint_pos={
-                ".*_shoulder_roll_joint": -1.4,
-                ".*shoulder_pitch_joint": 0.4,
-                # "left_hip_yaw_joint": -0.5,
-            },
-        ),
-        actuators={
-            "body": DCMotorCfg(
-                joint_names_expr=".*",
-                actuator_effort_limit=EFFORT_LIMIT,
-                saturation_effort=EFFORT_LIMIT,
-                actuator_velocity_limit=VELOCITY_LIMIT,
-                stiffness=STIFFNESS,
-                damping=DAMPING,
-                armature={".*": 0.01},
-            )
-        },
-    )
-
-
-import math
+    robot: ArticulationCfg = ROBINION_CFG
 
 
 def main():
@@ -156,7 +67,7 @@ def main():
     sim.reset()
     # Now we are ready!
     print("[INFO]: Setup complete...")
-    print(robot.actuators["body"])
+    print(robot.actuators)
     joint_ids, joint_names = robot.find_joints(".*")
     print(joint_ids, joint_names)
 
@@ -172,9 +83,7 @@ def main():
     # )
 
     robot.write_root_state_to_sim(robot.data.default_root_state)
-    robot.write_joint_state_to_sim(
-        robot.data.default_joint_pos, robot.data.default_joint_vel
-    )
+    robot.write_joint_state_to_sim(robot.data.default_joint_pos, robot.data.default_joint_vel)
     robot.set_joint_position_target(robot.data.default_joint_pos.clone())
     robot.write_data_to_sim()
 
