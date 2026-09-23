@@ -121,7 +121,7 @@ class ObservationsCfg:
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1)
-        gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.5, "offset": [0.0, 0.5]})
+        gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.4, "offset": [0.0, 0.5]})
         last_action = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self) -> None:
@@ -141,7 +141,7 @@ class ObservationsCfg:
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1)
-        gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.5, "offset": [0.0, 0.5]})
+        gait_phase = ObsTerm(func=mdp.gait_phase, params={"period": 0.4, "offset": [0.0, 0.5]})
         last_action = ObsTerm(func=mdp.last_action)
 
     # privileged observations
@@ -227,7 +227,7 @@ class RewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
-            "period": 0.5,
+            "period": 0.4,
             "offset": [0.0, 0.5],
             "swing_center": 0.25,
             "swing_period": 0.4,
@@ -249,7 +249,7 @@ class RewardsCfg:
         func=mdp.feet_gait,
         weight=2.0,
         params={
-            "period": 0.5,
+            "period": 0.4,
             "offset": [0.0, 0.5],
             "swing_center": 0.25,
             "swing_period": 0.4,
@@ -262,11 +262,11 @@ class RewardsCfg:
         func=mdp.arm_swing_gait,
         weight=1.5,
         params={
-            "period": 0.5,
+            "period": 0.4,
             "offset": [0.0, 0.0],
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_pitch_joint"),
-            "amplitude": 0.25,
-            "std": 0.3,
+            "amplitude": 0.2,
+            "std": 0.1,
             "phase_offset": math.pi,
             "command_name": "base_velocity",
         },
@@ -275,7 +275,7 @@ class RewardsCfg:
     pen_base_height = RewTerm(
         func=mdp.base_height_l2,
         weight=-10.0,
-        params={"target_height": 0.60},
+        params={"target_height": 0.54},
     )
     pen_lin_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     pen_ang_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
@@ -307,7 +307,7 @@ class RewardsCfg:
     # )
     pen_joint_deviation_torso = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.2,
+        weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names="torso_pitch_joint")},
     )
     pen_arm_deviation = RewTerm(
@@ -341,14 +341,17 @@ class RewardsCfg:
     pen_feet_distance = RewTerm(
         func=mdp.feet_distance,
         weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
-    )
-    pen_extended_contact = RewTerm(
-        func=mdp.contact_forces,
-        weight=-0.0005,
         params={
-            "threshold": 1000,
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+            "left_foot_cfg": SceneEntityCfg("robot", body_names="left_foot.*"),
+            "right_foot_cfg": SceneEntityCfg("robot", body_names="right_foot.*"),
+        },
+    )
+    pen_self_collision = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*thigh.*", ".*shin.*", ".*knee.*", ".*hip.*"]),
+            "threshold": 1.0,
         },
     )
 

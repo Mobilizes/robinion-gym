@@ -93,8 +93,9 @@ def arm_swing_gait(
     same-side leg is in its support (stance) phase, counter-balancing the legs and improving
     stability.
 
-    The oscillation is centered on each joint's default position. If ``command_name`` is given,
-    the reward is zero whenever the commanded velocity is (near) zero.
+    The oscillation is centered on the neutral (zero) joint position, so the arms swing about the
+    hanging pose rather than a fixed forward offset. If ``command_name`` is given, the reward is
+    zero whenever the commanded velocity is (near) zero.
     """
     asset: Articulation = env.scene[asset_cfg.name]
 
@@ -102,9 +103,7 @@ def arm_swing_gait(
     phases = [(global_phase + off) % 1.0 for off in offset]
     arm_phase = torch.cat(phases, dim=-1)  # (num_envs, num_arms)
 
-    target = asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids] + amplitude * torch.sin(
-        2.0 * torch.pi * arm_phase + phase_offset
-    )
+    target = amplitude * torch.sin(2.0 * torch.pi * arm_phase + phase_offset)
     joint_pos = asset.data.joint_pos.torch[:, asset_cfg.joint_ids]
     error = torch.sum(torch.square(joint_pos - target), dim=-1)
     reward = torch.exp(-error / std**2)
@@ -187,15 +186,27 @@ def feet_yaw_mean(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntit
     return torch.square((base_yaw - feet_yaw_mean + torch.pi) % (2 * torch.pi) - torch.pi)
 
 
-def feet_distance(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    asset: Articulation = env.scene[asset_cfg.name]
+def feet_distance(
+    env: ManagerBasedRLEnv,
+    left_foot_cfg: SceneEntityCfg,
+    right_foot_cfg: SceneEntityCfg,
+    target_distance: float = 0.25,
+) -> torch.Tensor:
+    """Penalize the left foot being too close to, or crossing over, the right foot.
+
+    The signed lateral (base-frame y) separation ``left - right`` is penalized whenever it is
+    below ``target_distance``. A narrow stance yields a small penalty, while crossed feet
+    (negative separation) yield a much larger one, so the left foot is kept on the left side of
+    the right foot rather than the term only enforcing a sign-agnostic distance.
+    """
+    asset: Articulation = env.scene[left_foot_cfg.name]
 
     base_yaw = euler_xyz_from_quat(asset.data.root_quat_w.torch)[2]
-    feet_pos = asset.data.body_pos_w.torch[:, asset_cfg.body_ids]
+    left_pos = asset.data.body_pos_w.torch[:, left_foot_cfg.body_ids[0]]
+    right_pos = asset.data.body_pos_w.torch[:, right_foot_cfg.body_ids[0]]
 
-    feet_distance = torch.abs(
-        torch.cos(base_yaw) * (feet_pos[:, 1, 1] - feet_pos[:, 0, 1])
-        - torch.sin(base_yaw) * (feet_pos[:, 1, 0] - feet_pos[:, 0, 0])
+    lateral = torch.cos(base_yaw) * (left_pos[:, 1] - right_pos[:, 1]) - torch.sin(base_yaw) * (
+        left_pos[:, 0] - right_pos[:, 0]
     )
 
-    return torch.clip(0.1 - feet_distance, min=0.0, max=0.1)
+    return torch.clip(target_distance - lateral, min=0.0, max=0.5)

@@ -11,7 +11,7 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 48
-    max_iterations = 20000
+    max_iterations = 4000
     save_interval = 100
     experiment_name = "robinion_velocity"
     obs_groups = {"actor": ["actor"], "critic": ["critic"]}

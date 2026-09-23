@@ -25,7 +25,26 @@ if [[ -z "${EXTS_DIR}" ]]; then
   exit 1
 fi
 
-export PYTHONPATH="${EXTS_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
-export LD_LIBRARY_PATH="${EXTS_DIR}bin${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# Drop ROS 2 and system CUDA toolkit paths inherited from the calling shell.
+# A system CUDA toolkit (e.g. CUDA 13 under /usr/local/cuda) shadows the CUDA 12
+# runtime bundled with Isaac Lab's PyTorch and breaks `import torch` with:
+#   ImportError: libc10_cuda.so: undefined symbol: cudaGetDriverEntryPointByVersion
+_filter_path() {
+  local IFS=':'
+  local p cleaned=""
+  for p in $1; do
+    case "$p" in
+      ""|*"/opt/ros"*|*"ros2-ws"*|*"/usr/local/cuda"*) continue ;;
+      *) cleaned="${cleaned}${cleaned:+:}$p" ;;
+    esac
+  done
+  printf '%s' "$cleaned"
+}
+
+_clean_ld="$( _filter_path "${LD_LIBRARY_PATH:-}" )"
+_clean_py="$( _filter_path "${PYTHONPATH:-}" )"
+
+export PYTHONPATH="${EXTS_DIR}${_clean_py:+:${_clean_py}}"
+export LD_LIBRARY_PATH="${EXTS_DIR}bin${_clean_ld:+:${_clean_ld}}"
 
 exec uv run --extra isaacsim isaaclab "$@"

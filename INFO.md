@@ -60,3 +60,94 @@ Prim path: `/World/envs/env_[^/]+/Robot`
 ```python
 [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 ```
+
+
+## Walk v0
+                            Total steps: 409534464
+                       Steps per second: 87614
+                        Collection time: 1.785s
+                          Learning time: 0.459s
+                        Mean value loss: 0.0069
+                    Mean surrogate loss: -0.0027
+                      Mean entropy loss: 7.2790
+                            Mean reward: 117.19
+                    Mean episode length: 1800.00
+                        Mean action std: 0.33
+              Episode_Reward/pen_ang_xy: -0.1604
+         Episode_Reward/pen_action_rate: -0.3905
+     Metrics/base_velocity/error_vel_xy: 0.1083
+           Episode_Reward/pen_joint_acc: -0.0445
+        Episode_Termination/term_height: 0.0007
+       Episode_Reward/pen_feet_distance: -0.0250
+    Episode_Reward/pen_extended_contact: 0.0000
+          Episode_Reward/pen_feet_slide: -0.0465
+             Episode_Reward/pen_arm_vel: -0.2162
+    Episode_Reward/pen_flat_orientation: -0.0037
+         Episode_Reward/pen_termination: 0.0000
+    Metrics/base_velocity/error_vel_yaw: 0.7093
+    Episode_Reward/pen_dof_action_limit: -0.0050
+               Episode_Reward/pen_lin_z: -0.0266
+       Episode_Reward/pen_feet_yaw_diff: -0.0123
+         Episode_Reward/pen_base_height: -0.0349
+               Episode_Reward/rew_alive: 0.1500
+       Episode_Reward/pen_dof_joint_pos: -0.0050
+           Episode_Reward/rew_arm_swing: 1.4323
+           Episode_Reward/pen_joint_vel: -0.0210
+       Episode_Termination/term_timeout: 0.9993
+       Episode_Reward/rew_track_ang_vel: 0.1860
+       Episode_Reward/pen_feet_yaw_mean: -0.0141
+           Episode_Reward/rew_feet_gait: 1.5756
+       Episode_Reward/rew_track_lin_vel: 1.2158
+       Episode_Reward/pen_arm_deviation: -0.1114
+   Episode_Reward/rew_feet_flat_contact: 0.4833
+                   Metrics/success_rate: 0.0000
+Episode_Reward/pen_joint_deviation_torso: -0.0369
+--------------------------------------------------------------------------------
+                         Iteration time: 2.24s
+                           Time elapsed: 1:14:08
+                                    ETA: 10:37:47
+
+## Walk v1
+                            Total steps: 786432000
+                       Steps per second: 88075
+                        Collection time: 1.778s
+                          Learning time: 0.455s
+                        Mean value loss: 0.0186
+                    Mean surrogate loss: -0.0014
+                      Mean entropy loss: 5.3213
+                            Mean reward: 88.27
+                    Mean episode length: 1769.07
+                        Mean action std: 0.32
+       Episode_Reward/rew_track_lin_vel: 1.0688
+             Episode_Reward/pen_arm_vel: -0.1867
+   Episode_Reward/rew_feet_flat_contact: 0.4260
+     Metrics/base_velocity/error_vel_xy: 0.1431
+        Episode_Termination/term_height: 0.0122
+           Episode_Reward/pen_joint_acc: -0.0437
+           Episode_Reward/rew_feet_gait: 1.4505
+      Episode_Reward/pen_self_collision: -0.0009
+       Episode_Reward/pen_feet_yaw_diff: -0.0112
+                   Metrics/success_rate: 0.0000
+               Episode_Reward/pen_lin_z: -0.0352
+       Episode_Reward/rew_track_ang_vel: 0.1145
+    Episode_Reward/pen_dof_action_limit: -0.0056
+       Episode_Reward/pen_feet_yaw_mean: -0.0120
+         Episode_Reward/pen_action_rate: -0.4158
+              Episode_Reward/pen_ang_xy: -0.2252
+         Episode_Reward/pen_termination: -0.0007
+       Episode_Termination/term_timeout: 0.9878
+    Episode_Reward/pen_flat_orientation: -0.0069
+       Episode_Reward/pen_arm_deviation: -0.4065
+               Episode_Reward/rew_alive: 0.1465
+          Episode_Reward/pen_feet_slide: -0.0570
+       Episode_Reward/pen_feet_distance: -0.0388
+    Metrics/base_velocity/error_vel_yaw: 1.3793
+           Episode_Reward/rew_arm_swing: 1.3102
+           Episode_Reward/pen_joint_vel: -0.0249
+Episode_Reward/pen_joint_deviation_torso: -0.0991
+         Episode_Reward/pen_base_height: -0.0105
+       Episode_Reward/pen_dof_joint_pos: -0.0056
+--------------------------------------------------------------------------------
+                         Iteration time: 2.23s
+                           Time elapsed: 2:28:50
+                                    ETA: 0:00:00
