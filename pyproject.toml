@@ -121,7 +121,29 @@ exclude = ["**/__pycache__", "**/logs", ".git", ".venv", ".vscode"]
 # Make the editable Isaac Lab source packages resolvable by Pylance / basedpyright
 # without relying on the editable-install finder, so re-exported terms such as
 # ``mdp.base_height_l2`` resolve through ``from isaaclab.envs.mdp import *``.
-extraPaths = ["../../IsaacLab/source/*"]
+# NOTE: pyright does not expand globs in extraPaths, so each source package root is
+# listed explicitly (each contains a package directory of the same name).
+extraPaths = [
+    "src",
+    "../../IsaacLab/source/isaaclab",
+    "../../IsaacLab/source/isaaclab_assets",
+    "../../IsaacLab/source/isaaclab_contrib",
+    "../../IsaacLab/source/isaaclab_experimental",
+    "../../IsaacLab/source/isaaclab_mimic",
+    "../../IsaacLab/source/isaaclab_newton",
+    "../../IsaacLab/source/isaaclab_ov",
+    "../../IsaacLab/source/isaaclab_physx",
+    "../../IsaacLab/source/isaaclab_ppisp",
+    "../../IsaacLab/source/isaaclab_rl",
+    "../../IsaacLab/source/isaaclab_tasks",
+    "../../IsaacLab/source/isaaclab_tasks_experimental",
+    "../../IsaacLab/source/isaaclab_teleop",
+    "../../IsaacLab/source/isaaclab_visualizers",
+]
+# Use the project's uv venv for third-party imports (torch, etc.). Pylance / basedpyright
+# run in this project should resolve the editable Isaac Lab packages via extraPaths above.
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]

@@ -15,8 +15,11 @@ __all__ = [
     # custom rewards
     "joint_pos_target_l2",
     "joint_deviation_l2",
+    "base_rp_l2",
     "feet_gait",
     "arm_swing_gait",
+    "feet_clearance",
+    "feet_flat",
     "feet_flat_contact",
     "feet_yaw_diff",
     "feet_yaw_mean",
@@ -25,6 +28,7 @@ __all__ = [
 
 # Forward stable MDP terms lazily, then override with environment-specific terms below.
 from isaaclab.envs.mdp import *  # noqa: F401, F403
+
 from isaaclab_tasks.core.velocity.mdp.rewards import *  # noqa: F401, F403
 
 from .commands import UniformLevelVelocityCommand, UniformLevelVelocityCommandCfg
@@ -32,7 +36,10 @@ from .events import override_joint_pos_limits, reset_non_finite_envs
 from .observations import gait_phase
 from .rewards import (
     arm_swing_gait,
+    base_rp_l2,
+    feet_clearance,
     feet_distance,
+    feet_flat,
     feet_flat_contact,
     feet_gait,
     feet_yaw_diff,

@@ -158,7 +158,7 @@ ROBINION_CFG = ArticulationCfg(
             "torso_pitch_joint": 0.0,
             "head_.*_joint": 0.0,
             ".*_shoulder_roll_joint": -1.4,
-            ".*_shoulder_pitch_joint": 0.4,
+            ".*_shoulder_pitch_joint": 0.0,
             ".*_elbow_.*_joint": 0.0,
         },
         joint_vel={".*": 0.0},
