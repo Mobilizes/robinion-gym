@@ -251,15 +251,15 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
     )
 
-    # rew_feet_air_time = RewTerm(
-    #     func=mdp.feet_air_time_positive_biped,
-    #     weight=0.25,
-    #     params={
-    #         "command_name": "base_velocity",
-    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
-    #         "threshold": 0.4,
-    #     },
-    # )
+    rew_feet_air_time = RewTerm(
+        func=mdp.feet_air_time_positive_biped,
+        weight=0.2,
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+            "threshold": 0.4,
+        },
+    )
 
     rew_feet_gait = RewTerm(
         func=mdp.feet_gait,
@@ -347,6 +347,13 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*")
         },
     )
+    pen_arm_wide = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-2.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_roll_joint")
+        },
+    )
     pen_dof_action_limit = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
     pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
     pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
@@ -383,7 +390,7 @@ class RewardsCfg:
     )
     pen_self_collision = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-1.0,
+        weight=-40.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
