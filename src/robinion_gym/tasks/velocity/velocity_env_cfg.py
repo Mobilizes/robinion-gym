@@ -20,6 +20,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 from isaaclab_physx.physics import PhysxCfg
 
 from isaaclab_tasks.utils import PresetCfg
@@ -100,10 +101,10 @@ class CommandsCfg:
         heading_command=False,
         debug_vis=True,
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.5, 1.5), lin_vel_y=(-0.3, 0.3), ang_vel_z=(0.0, 0.5)
+            lin_vel_x=(-0.25, 0.75), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.25, 0.25)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.5, 1.5), lin_vel_y=(-0.3, 0.3), ang_vel_z=(0.0, 0.5)
+            lin_vel_x=(-0.5, 1.5), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.5, 0.5)
         ),
     )
 
@@ -118,20 +119,20 @@ class ObservationsCfg:
 
         # base_height = ObsTerm(func=mdp.base_pos_z)
         # base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
-        projected_gravity = ObsTerm(func=projected_gravity)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25, noise=Unoise(n_min=-0.01, n_max=0.01))
+        projected_gravity = ObsTerm(func=projected_gravity, noise=Unoise(n_min=-0.01, n_max=0.01))
         velocity_commands = ObsTerm(
             func=mdp.generated_commands, params={"command_name": "base_velocity"}
         )
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1)
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.05, n_max=0.05))
+        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1, noise=Unoise(n_min=-0.1, n_max=0.1))
         gait_phase = ObsTerm(
             func=mdp.gait_phase, params={"period": 0.4, "offset": [0.0, 0.5]}
         )
         last_action = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self) -> None:
-            pass
+            self.enable_corruption = True
 
     # observation groups
     actor: ActorCfg = ActorCfg()
@@ -183,16 +184,16 @@ class EventCfg:
         mode="reset",
         params={
             "position_range": (1.0, 1.0),
-            "velocity_range": (-1.0, 1.0),
+            "velocity_range": (0.0, 0.0),
         },
     )
 
-    # push_robot = EventTerm(
-    #     func=mdp.push_by_setting_velocity,
-    #     mode="interval",
-    #     interval_range_s=(4.0, 6.0),
-    #     params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}},
-    # )
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(2.0, 4.0),
+        params={"velocity_range": {"x": (-0.6, 0.6), "y": (-0.6, 0.6)}},
+    )
 
     reset_non_finite = EventTerm(
         func=mdp.reset_non_finite_envs,
@@ -220,7 +221,7 @@ class RewardsCfg:
     rew_track_lin_vel = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
         weight=1.5,
-        params={"command_name": "base_velocity", "std": 0.25},
+        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     )
 
     rew_track_ang_vel = RewTerm(
@@ -354,8 +355,7 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_roll_joint")
         },
     )
-    pen_dof_action_limit = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
-    pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
+    pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
     pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
     pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-5.0)
 
@@ -444,9 +444,15 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics = RobinionPhysicsCfg()
 
-
-@configclass
-class RobinionVelocityPlayEnvCfg(RobinionVelocityEnvCfg):
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def play_mode(self) -> None:
+        """Play-mode overrides: full commands and the periodic training pushes."""
+        super().play_mode()
+        # use the full command range instead of the curriculum's initial level
         self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+        # keep the training pushes so push recovery can be evaluated in play
+        self.events.push_robot = EventTerm(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=(4.0, 6.0),
+            params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}},
+        )
