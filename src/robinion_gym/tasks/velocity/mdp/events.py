@@ -9,10 +9,14 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
 if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedRLEnv
+    from collections.abc import Sequence
+
+    from isaaclab.assets import Articulation
+    from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
+    from isaaclab.managers import EventTermCfg
 
 
 def reset_non_finite_envs(
@@ -100,3 +104,96 @@ def override_joint_pos_limits(
     new_limits = torch.stack([new_low, new_high], dim=-1)
     # write into the physics simulation
     asset.write_joint_position_limit_to_sim_index(limits=new_limits, joint_ids=joint_ids, env_ids=env_ids)
+
+
+class push_robot_by_force(ManagerTermBase):
+    """Push the robot with a short horizontal force, similar to a physical shove.
+
+    Unlike :func:`push_by_setting_velocity`, which writes the sampled push directly into the
+    root velocity, this term applies a horizontal force for ``duration_s`` so that the base
+    velocity changes through the physics. Each body is driven with ``mass * dv / duration_s``,
+    which makes the resulting base velocity change match ``velocity_range`` exactly.
+
+    The term schedules its own pushes, so it must be used as an ``interval`` event with an
+    interval of ``(0.0, 0.0)`` to be called on every environment step.
+
+    Args:
+        velocity_range: Desired base velocity change along the world x and y axes.
+        duration_s: Duration of the shove in seconds.
+        push_interval_range_s: Time between consecutive pushes, sampled per environment.
+        asset_cfg: The articulation the pushes are applied to.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset: Articulation = env.scene[cfg.params["asset_cfg"].name]
+        self._force_w = torch.zeros(env.num_envs, self._asset.num_bodies, 3, device=env.device)
+        self._active = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._push_time_left = torch.zeros(env.num_envs, device=env.device)
+        self._time_until_push = torch.zeros(env.num_envs, device=env.device)
+        self._sample_time_until_push(slice(None))
+
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids: torch.Tensor,
+        velocity_range: dict[str, tuple[float, float]],
+        duration_s: float,
+        push_interval_range_s: tuple[float, float],
+        asset_cfg: SceneEntityCfg,
+    ) -> None:
+        dt = env.step_dt
+
+        self._push_time_left[self._active] -= dt
+        expired = self._active & (self._push_time_left <= 0.0)
+        if expired.any():
+            expired_ids = expired.nonzero(as_tuple=False).flatten()
+            self._force_w[expired_ids] = 0.0
+            self._write(expired_ids)
+            self._active[expired_ids] = False
+            self._push_time_left[expired_ids] = 0.0
+
+        self._time_until_push[~self._active] -= dt
+        firing = (~self._active) & (self._time_until_push <= 0.0)
+        if firing.any():
+            firing_ids = firing.nonzero(as_tuple=False).flatten()
+            bounds = torch.tensor(
+                [velocity_range.get("x", (0.0, 0.0)), velocity_range.get("y", (0.0, 0.0))],
+                device=env.device,
+            )
+            rand = torch.rand(len(firing_ids), 2, device=env.device)
+            delta_v = bounds[:, 0] + rand * (bounds[:, 1] - bounds[:, 0])
+            mass = self._asset.data.body_mass.torch[firing_ids]
+            self._force_w[firing_ids] = 0.0
+            self._force_w[firing_ids, :, :2] = mass.unsqueeze(-1) * (delta_v / duration_s).unsqueeze(1)
+            self._active[firing_ids] = True
+            self._push_time_left[firing_ids] = duration_s
+            self._sample_time_until_push(firing_ids)
+            self._write(firing_ids)
+
+        active_ids = self._active.nonzero(as_tuple=False).flatten()
+        if len(active_ids) > 0:
+            self._write(active_ids)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        super().reset(env_ids)
+        env_ids = slice(None) if env_ids is None else env_ids
+        self._active[env_ids] = False
+        self._push_time_left[env_ids] = 0.0
+        self._force_w[env_ids] = 0.0
+        self._sample_time_until_push(env_ids)
+
+    def _sample_time_until_push(self, env_ids: slice | torch.Tensor) -> None:
+        lower, upper = self.cfg.params["push_interval_range_s"]
+        num = self._env.num_envs if isinstance(env_ids, slice) else len(env_ids)
+        self._time_until_push[env_ids] = lower + torch.rand(num, device=self._env.device) * (upper - lower)
+
+    def _write(self, env_ids: torch.Tensor) -> None:
+        forces = self._force_w[env_ids]
+        self._asset.permanent_wrench_composer.set_forces_and_torques_index(
+            forces=forces,
+            torques=torch.zeros_like(forces),
+            body_ids=None,
+            env_ids=env_ids.to(dtype=torch.int32),
+            is_global=True,
+        )

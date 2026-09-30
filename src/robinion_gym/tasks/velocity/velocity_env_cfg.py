@@ -188,11 +188,17 @@ class EventCfg:
         },
     )
 
+    # force-based shove: the term runs every step and schedules its own pushes
     push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
+        func=mdp.push_robot_by_force,
         mode="interval",
-        interval_range_s=(2.0, 4.0),
-        params={"velocity_range": {"x": (-0.6, 0.6), "y": (-0.6, 0.6)}},
+        interval_range_s=(0.0, 0.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)},
+            "duration_s": 0.2,
+            "push_interval_range_s": (4.0, 6.0),
+        },
     )
 
     reset_non_finite = EventTerm(
@@ -445,14 +451,7 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics = RobinionPhysicsCfg()
 
     def play_mode(self) -> None:
-        """Play-mode overrides: full commands and the periodic training pushes."""
+        """Play-mode overrides: play with the full velocity command range."""
         super().play_mode()
         # use the full command range instead of the curriculum's initial level
         self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
-        # keep the training pushes so push recovery can be evaluated in play
-        self.events.push_robot = EventTerm(
-            func=mdp.push_by_setting_velocity,
-            mode="interval",
-            interval_range_s=(4.0, 6.0),
-            params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}},
-        )

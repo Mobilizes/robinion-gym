@@ -243,3 +243,49 @@ Episode_Reward/pen_joint_deviation_torso: -0.0451
                          Iteration time: 2.23s
                            Time elapsed: 2:29:37
                                     ETA: 0:00:00
+
+## Walk v3 with Push And Noise
+                            Total steps: 786432000
+                       Steps per second: 71221
+                        Collection time: 2.306s
+                          Learning time: 0.455s
+                        Mean value loss: 0.0585
+                    Mean surrogate loss: -0.0020
+                      Mean entropy loss: -3.5665
+                            Mean reward: 272.43
+                    Mean episode length: 1800.00
+                        Mean action std: 0.24
+      Episode_Reward/pen_self_collision: 0.0000
+        Episode_Termination/term_height: 0.0051
+          Episode_Reward/pen_feet_slide: -0.1229
+               Episode_Reward/pen_lin_z: -0.0247
+       Episode_Reward/pen_dof_joint_pos: -0.0100
+       Episode_Reward/pen_feet_distance: -0.0166
+Episode_Reward/pen_joint_deviation_torso: -0.0538
+           Episode_Reward/rew_feet_gait: 1.4647
+         Episode_Reward/pen_termination: 0.0000
+       Episode_Reward/pen_arm_deviation: -0.0879
+                   Metrics/success_rate: 0.0000
+               Episode_Reward/rew_alive: 0.1500
+           Episode_Reward/rew_feet_flat: 0.9905
+            Episode_Reward/pen_arm_wide: -0.0768
+    Metrics/base_velocity/error_vel_yaw: 0.5620
+    Episode_Reward/pen_flat_orientation: -0.0045
+              Episode_Reward/pen_ang_xy: -0.1730
+         Episode_Reward/pen_action_rate: -0.7471
+       Episode_Reward/pen_feet_yaw_diff: -0.0093
+           Episode_Reward/rew_arm_swing: 1.3973
+       Episode_Reward/rew_track_ang_vel: 0.2267
+       Episode_Termination/term_timeout: 0.9949
+           Episode_Reward/pen_joint_vel: -0.0197
+           Episode_Reward/pen_joint_acc: -0.0237
+       Episode_Reward/pen_feet_yaw_mean: -0.0057
+         Episode_Reward/pen_base_height: -0.0521
+       Episode_Reward/rew_feet_air_time: 0.0118
+       Episode_Reward/rew_track_lin_vel: 1.3860
+      Episode_Reward/rew_feet_clearance: 4.8749
+     Metrics/base_velocity/error_vel_xy: 0.1253
+--------------------------------------------------------------------------------
+                         Iteration time: 2.76s
+                           Time elapsed: 3:02:41
+                                    ETA: 0:00:00
