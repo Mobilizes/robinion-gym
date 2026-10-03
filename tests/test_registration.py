@@ -15,7 +15,7 @@ def test_task_registrations():
     expected = {
         "RobinionGym-Velocity-Robinion": {
             "entry_point": "isaaclab.envs:ManagerBasedRLEnv",
-            "env_cfg_entry_point": "robinion_gym.tasks.velocity.config.robinion.env_cfg:VelocityEnvCfg",
+            "env_cfg_entry_point": "robinion_gym.tasks.velocity.velocity_env_cfg:RobinionVelocityEnvCfg",
             "default_agent": "rsl_rl",
         },
     }

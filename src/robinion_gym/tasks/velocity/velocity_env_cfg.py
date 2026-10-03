@@ -163,6 +163,18 @@ class ObservationsCfg:
 class EventCfg:
     """Configuration for events."""
 
+    # Set the hard knee lower limit to 0 rad at startup; the zero-width range is deterministic.
+    knee_pitch_lower_limit = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_knee_pitch_joint"]),
+            "lower_limit_distribution_params": (0.0, 0.0),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
     reset_all = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
@@ -195,9 +207,11 @@ class EventCfg:
         interval_range_s=(0.0, 0.0),
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)},
+            "velocity_range": {"x": (-1.5, 1.5), "y": (-1.5, 1.5)},
             "duration_s": 0.2,
             "push_interval_range_s": (4.0, 6.0),
+            # draw a red arrow for the active push force
+            "debug_vis": True,
         },
     )
 
@@ -260,7 +274,7 @@ class RewardsCfg:
 
     rew_feet_air_time = RewTerm(
         func=mdp.feet_air_time_positive_biped,
-        weight=0.2,
+        weight=1.0,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
@@ -308,9 +322,9 @@ class RewardsCfg:
     )
 
     pen_base_height = RewTerm(
-        func=mdp.base_height_l2,
+        func=mdp.base_height_l1,
         weight=-10.0,
-        params={"target_height": 0.48},
+        params={"target_height": 0.54},
     )
     pen_lin_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     pen_ang_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
@@ -440,15 +454,16 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
     # Post initialization
     def __post_init__(self) -> None:
         """Post initialization."""
-        # general settings
         self.decimation = 2
         self.episode_length_s = 30
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
-        self.sim.dt = 1 / 120
+        self.sim.dt = 1 / 200
         self.sim.render_interval = self.decimation
         self.sim.physics = RobinionPhysicsCfg()
+        # tick the contact sensor with the physics step so it samples at 200 Hz
+        self.scene.contact_forces.update_period = self.sim.dt
 
     def play_mode(self) -> None:
         """Play-mode overrides: play with the full velocity command range."""

@@ -54,7 +54,7 @@ def main():
     """Main function."""
 
     # Initialize the simulation context
-    sim_cfg = SimulationCfg(dt=0.01, gravity=(0.0, 0.0, -0.5))
+    sim_cfg = SimulationCfg(dt=0.01, gravity=(0.0, 0.0, -0.0))
     sim = SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view([2.5, 0.0, 2.5], [0.0, 0.0, 1.0])
@@ -71,7 +71,7 @@ def main():
     joint_ids, joint_names = robot.find_joints(".*")
     print(joint_ids, joint_names)
 
-    body_ids, body_names = robot.find_bodies(".*foot.*")
+    body_ids, body_names = robot.find_joints(".*shin_pitch.*")
     print(body_ids, body_names)
     # print(
     #     "hard limits:",
@@ -92,7 +92,7 @@ def main():
 
     # Simulate physics
     while simulation_app.is_running():
-        print(robot.data.root_pos_w.torch[:, 2])
+        # print(robot.data.root_pos_w.torch[:, 2])
         # quat = robot.data.body_quat_w[:, body_ids]
         # print(euler_xyz_from_quat(quat.reshape(-1, 4))[2])
 

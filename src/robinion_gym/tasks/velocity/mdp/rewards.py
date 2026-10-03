@@ -42,6 +42,21 @@ def joint_deviation_l2(
     return torch.sum(torch.square(deviation), dim=-1)
 
 
+def base_height_l1(
+    env: ManagerBasedRLEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize base height deviation from ``target_height`` with an L1 (absolute) kernel.
+
+    Unlike :func:`isaaclab.envs.mdp.base_height_l2`, the gradient magnitude stays constant
+    instead of shrinking with the error, so small height deviations are corrected as strongly
+    as large ones, which keeps the base height tightly tracked.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.abs(asset.data.root_pos_w.torch[:, 2] - target_height)
+
+
 def feet_gait(
     env: ManagerBasedRLEnv,
     period: float,

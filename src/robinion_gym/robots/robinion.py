@@ -120,7 +120,7 @@ _ARMATURE = 0.02
 # Standing crouch of the parallelogram legs. The USD models the linkage as independent
 # revolute joints (no closed loop), so the knee/back-thigh/shin joints are actuated together
 # with the front thigh rather than left passive.
-_LEG_CROUCH = 0.3  # rad
+_LEG_CROUCH = 0.0  # rad
 
 ROBINION_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",

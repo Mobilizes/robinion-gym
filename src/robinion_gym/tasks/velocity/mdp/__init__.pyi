@@ -16,6 +16,7 @@ __all__ = [
     # custom rewards
     "joint_pos_target_l2",
     "joint_deviation_l2",
+    "base_height_l1",
     "base_rp_l2",
     "feet_gait",
     "arm_swing_gait",
@@ -37,6 +38,7 @@ from .events import override_joint_pos_limits, push_robot_by_force, reset_non_fi
 from .observations import gait_phase
 from .rewards import (
     arm_swing_gait,
+    base_height_l1,
     base_rp_l2,
     feet_clearance,
     feet_distance,

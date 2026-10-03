@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers.config import RED_ARROW_X_MARKER_CFG
+from isaaclab.utils.math import quat_from_euler_xyz
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,20 +26,36 @@ def reset_non_finite_envs(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_joint_vel: float = 50.0,
+    max_root_lin_vel: float = 20.0,
+    max_root_ang_vel: float = 50.0,
 ) -> None:
-    """Reset environments whose state has become non-finite (diverged).
+    """Reset environments whose state has diverged (non-finite or physically implausible).
 
-    This is a safety guard against numerical blow-ups (NaN/inf in joint states or root pose)
-    that can poison the RL rollout and crash training. It force-resets the affected
-    environments through the standard reset pipeline, clears their already-computed reward,
-    and flags them as terminated so the RL runner bootstraps correctly.
+    This is a safety guard against numerical blow-ups that can poison the RL rollout and crash
+    training. It force-resets the affected environments through the standard reset pipeline,
+    clears their already-computed reward, and flags them as terminated so the RL runner
+    bootstraps correctly.
+
+    A diverging rigid body does not necessarily become non-finite immediately: it can stay
+    finite for several steps while producing enormous observations and rewards. Those values
+    are far more damaging to the value function than one bad step, so states beyond the
+    ``max_*`` thresholds are reset as well.
 
     Note:
         This is expected to be used as an ``interval`` event term with an interval of
         ``(0.0, 0.0)`` so that it runs every environment step.
+
+    Args:
+        env: The environment instance.
+        env_ids: The indices of the environments to apply the event to.
+        asset_cfg: The asset configuration for the articulation to check.
+        max_joint_vel: Maximum plausible absolute joint velocity [rad/s]. Defaults to ``50.0``.
+        max_root_lin_vel: Maximum plausible root linear velocity [m/s]. Defaults to ``20.0``.
+        max_root_ang_vel: Maximum plausible root angular velocity [rad/s]. Defaults to ``50.0``.
     """
     asset = env.scene[asset_cfg.name]
-    # check current state for non-finite values
+    # check current state for non-finite or implausible values
     joint_pos = asset.data.joint_pos.torch[env_ids]
     joint_vel = asset.data.joint_vel.torch[env_ids]
     root_pos = asset.data.root_pos_w.torch[env_ids]
@@ -52,7 +71,12 @@ def reset_non_finite_envs(
         & torch.isfinite(root_lin_vel).all(dim=-1)
         & torch.isfinite(root_ang_vel).all(dim=-1)
     )
-    bad_ids = env_ids[~finite]
+    plausible = (
+        (joint_vel.abs() <= max_joint_vel).all(dim=-1)
+        & (torch.linalg.norm(root_lin_vel, dim=-1) <= max_root_lin_vel)
+        & (torch.linalg.norm(root_ang_vel, dim=-1) <= max_root_ang_vel)
+    )
+    bad_ids = env_ids[~(finite & plausible)]
     if len(bad_ids) == 0:
         return
 
@@ -117,11 +141,20 @@ class push_robot_by_force(ManagerTermBase):
     The term schedules its own pushes, so it must be used as an ``interval`` event with an
     interval of ``(0.0, 0.0)`` to be called on every environment step.
 
+    When the ``debug_vis`` parameter is enabled, a red arrow is drawn above the robot base for
+    every push. The arrow points along the net push force and its length scales with the force
+    magnitude. It stays visible after the push ends, showing the most recent push until the next
+    push replaces it (and is cleared when the environment resets).
+
     Args:
         velocity_range: Desired base velocity change along the world x and y axes.
         duration_s: Duration of the shove in seconds.
         push_interval_range_s: Time between consecutive pushes, sampled per environment.
         asset_cfg: The articulation the pushes are applied to.
+        debug_vis: Whether to draw the red force arrow. Defaults to False.
+        marker_pos_offset: Offset [m] from the robot root where the force arrow is drawn.
+            Defaults to ``(0.0, 0.0, 0.5)``.
+        force_arrow_scale: Arrow length in meters per newton of net push force. Defaults to ``0.01``.
     """
 
     def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
@@ -132,6 +165,16 @@ class push_robot_by_force(ManagerTermBase):
         self._push_time_left = torch.zeros(env.num_envs, device=env.device)
         self._time_until_push = torch.zeros(env.num_envs, device=env.device)
         self._sample_time_until_push(slice(None))
+        # most recent push force per environment, kept for the persistent debug arrow
+        self._last_force_w = torch.zeros(env.num_envs, 3, device=env.device)
+        self._show_arrow = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        # red arrow marker that shows the push force (created only with debug visualization)
+        self._force_visualizer: VisualizationMarkers | None = None
+        if cfg.params.get("debug_vis", False):
+            self._force_visualizer = VisualizationMarkers(
+                RED_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Events/push_force")
+            )
+            self._force_visualizer.set_visibility(False)
 
     def __call__(
         self,
@@ -141,6 +184,7 @@ class push_robot_by_force(ManagerTermBase):
         duration_s: float,
         push_interval_range_s: tuple[float, float],
         asset_cfg: SceneEntityCfg,
+        debug_vis: bool = False,
     ) -> None:
         dt = env.step_dt
 
@@ -170,10 +214,16 @@ class push_robot_by_force(ManagerTermBase):
             self._push_time_left[firing_ids] = duration_s
             self._sample_time_until_push(firing_ids)
             self._write(firing_ids)
+            # remember the new push for the persistent debug arrow
+            self._last_force_w[firing_ids] = self._force_w[firing_ids].sum(dim=1)
+            self._show_arrow[firing_ids] = True
 
         active_ids = self._active.nonzero(as_tuple=False).flatten()
         if len(active_ids) > 0:
             self._write(active_ids)
+
+        if debug_vis and self._force_visualizer is not None:
+            self._update_force_visualization()
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         super().reset(env_ids)
@@ -181,6 +231,8 @@ class push_robot_by_force(ManagerTermBase):
         self._active[env_ids] = False
         self._push_time_left[env_ids] = 0.0
         self._force_w[env_ids] = 0.0
+        self._last_force_w[env_ids] = 0.0
+        self._show_arrow[env_ids] = False
         self._sample_time_until_push(env_ids)
 
     def _sample_time_until_push(self, env_ids: slice | torch.Tensor) -> None:
@@ -196,4 +248,44 @@ class push_robot_by_force(ManagerTermBase):
             body_ids=None,
             env_ids=env_ids.to(dtype=torch.int32),
             is_global=True,
+        )
+
+    def _update_force_visualization(self) -> None:
+        """Draw a red arrow at the robot base for the most recent push of every environment.
+
+        The arrow stays visible after a push ends so that the most recent push force keeps being
+        displayed until the next push replaces it.
+        """
+        visualizer = self._force_visualizer
+        if visualizer is None:
+            return
+        # hide the arrows until an environment has been pushed for the first time
+        shown_ids = self._show_arrow.nonzero(as_tuple=False).flatten()
+        if len(shown_ids) == 0:
+            visualizer.set_visibility(False)
+            return
+
+        # net force (N) of the most recent push, summed over the bodies
+        force_w = self._last_force_w[shown_ids]
+        # place the arrow above the robot base
+        offset = torch.tensor(
+            self.cfg.params.get("marker_pos_offset", (0.0, 0.0, 0.5)),
+            device=self.device,
+            dtype=force_w.dtype,
+        )
+        translations = self._asset.data.root_pos_w.torch[shown_ids].clone() + offset
+        # point the arrow along the horizontal force direction (world frame)
+        heading = torch.atan2(force_w[:, 1], force_w[:, 0])
+        orientations = quat_from_euler_xyz(torch.zeros_like(heading), torch.zeros_like(heading), heading)
+        # scale the arrow length with the force magnitude
+        default_scale = torch.tensor(visualizer.cfg.markers["arrow"].scale, device=self.device, dtype=force_w.dtype)
+        scales = default_scale.repeat(len(shown_ids), 1)
+        scales[:, 0] *= torch.linalg.norm(force_w[:, :2], dim=1) * self.cfg.params.get("force_arrow_scale", 0.01)
+
+        visualizer.set_visibility(True)
+        visualizer.visualize(
+            translations=translations,
+            orientations=orientations,
+            scales=scales,
+            environment_ids=shown_ids,
         )
