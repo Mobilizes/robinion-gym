@@ -335,3 +335,49 @@ Episode_Reward/pen_joint_deviation_torso: -0.0573
                          Iteration time: 2.63s
                            Time elapsed: 7:23:21
                                     ETA: 0:00:00
+
+## Walk v4.1
+Total steps: 1966080000
+                       Steps per second: 73380
+                        Collection time: 2.223s
+                          Learning time: 0.456s
+                        Mean value loss: 0.0493
+                    Mean surrogate loss: -0.0028
+                      Mean entropy loss: 39.1951
+                            Mean reward: 237.42
+                    Mean episode length: 2967.50
+                        Mean action std: 4.51
+    Episode_Reward/pen_flat_orientation: -0.0095
+      Episode_Reward/pen_self_collision: 0.0000
+    Metrics/base_velocity/error_vel_yaw: 0.6107
+               Episode_Reward/rew_alive: 0.1488
+           Episode_Reward/pen_joint_acc: -0.0558
+         Episode_Reward/pen_termination: -0.0006
+       Episode_Reward/pen_feet_yaw_mean: -0.0071
+          Episode_Reward/pen_feet_slide: -0.1145
+            Episode_Reward/pen_arm_wide: -0.1388
+                   Metrics/success_rate: 0.0000
+           Episode_Reward/rew_feet_flat: 0.9703
+Episode_Reward/pen_joint_deviation_torso: -0.0976
+     Metrics/base_velocity/error_vel_xy: 0.1997
+       Episode_Reward/pen_arm_deviation: -0.1281
+       Episode_Reward/pen_feet_yaw_diff: -0.0135
+           Episode_Reward/rew_arm_swing: 1.2953
+              Episode_Reward/pen_ang_xy: -0.2669
+       Episode_Reward/rew_feet_air_time: 0.0369
+         Episode_Reward/pen_base_height: -0.0542
+         Episode_Reward/pen_action_rate: -1.2823
+       Episode_Reward/pen_feet_distance: -0.0418
+       Episode_Termination/term_timeout: 0.9555
+       Episode_Reward/rew_track_ang_vel: 0.2128
+      Episode_Reward/rew_feet_clearance: 4.7514
+        Episode_Termination/term_height: 0.0445
+           Episode_Reward/rew_feet_gait: 1.5147
+       Episode_Reward/rew_track_lin_vel: 1.2509
+       Episode_Reward/pen_dof_joint_pos: -0.0308
+           Episode_Reward/pen_joint_vel: -0.0158
+               Episode_Reward/pen_lin_z: -0.0459
+--------------------------------------------------------------------------------
+                         Iteration time: 2.68s
+                           Time elapsed: 7:24:42
+                                    ETA: 0:00:00

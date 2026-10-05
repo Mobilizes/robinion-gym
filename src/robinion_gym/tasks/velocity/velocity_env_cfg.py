@@ -101,10 +101,10 @@ class CommandsCfg:
         heading_command=False,
         debug_vis=True,
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.25, 0.75), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.25, 0.25)
+            lin_vel_x=(-0.25, 0.75), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.25, 0.25)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.5, 1.5), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.5, 0.5)
+            lin_vel_x=(-0.5, 1.5), lin_vel_y=(-0.2, 0.2), ang_vel_z=(-0.5, 0.5)
         ),
     )
 
@@ -210,8 +210,10 @@ class EventCfg:
             "velocity_range": {"x": (-1.5, 1.5), "y": (-1.5, 1.5)},
             "duration_s": 0.2,
             "push_interval_range_s": (4.0, 6.0),
-            # draw a red arrow for the active push force
+            # draw a red arrow for the push force; the gain enlarges the arrow only,
+            # the applied push force/velocity is unchanged
             "debug_vis": True,
+            "force_arrow_scale": 0.05,
         },
     )
 
@@ -410,7 +412,7 @@ class RewardsCfg:
     )
     pen_self_collision = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-40.0,
+        weight=-500.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",

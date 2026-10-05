@@ -29,8 +29,9 @@ def reset_non_finite_envs(
     max_joint_vel: float = 50.0,
     max_root_lin_vel: float = 20.0,
     max_root_ang_vel: float = 50.0,
+    max_action: float = 10.0,
 ) -> None:
-    """Reset environments whose state has diverged (non-finite or physically implausible).
+    """Reset environments whose state has diverged (non-finite, implausible, or action runaway).
 
     This is a safety guard against numerical blow-ups that can poison the RL rollout and crash
     training. It force-resets the affected environments through the standard reset pipeline,
@@ -40,7 +41,10 @@ def reset_non_finite_envs(
     A diverging rigid body does not necessarily become non-finite immediately: it can stay
     finite for several steps while producing enormous observations and rewards. Those values
     are far more damaging to the value function than one bad step, so states beyond the
-    ``max_*`` thresholds are reset as well.
+    ``max_*`` thresholds are reset as well. The action check is a backstop for a policy whose
+    outputs run away faster than the robot state diverges, for example through the
+    ``last_action`` observation; keep ``max_action`` above any action clip range in use so it
+    only fires on genuine anomalies.
 
     Note:
         This is expected to be used as an ``interval`` event term with an interval of
@@ -53,6 +57,7 @@ def reset_non_finite_envs(
         max_joint_vel: Maximum plausible absolute joint velocity [rad/s]. Defaults to ``50.0``.
         max_root_lin_vel: Maximum plausible root linear velocity [m/s]. Defaults to ``20.0``.
         max_root_ang_vel: Maximum plausible root angular velocity [rad/s]. Defaults to ``50.0``.
+        max_action: Maximum plausible absolute action value. Defaults to ``10.0``.
     """
     asset = env.scene[asset_cfg.name]
     # check current state for non-finite or implausible values
@@ -75,6 +80,7 @@ def reset_non_finite_envs(
         (joint_vel.abs() <= max_joint_vel).all(dim=-1)
         & (torch.linalg.norm(root_lin_vel, dim=-1) <= max_root_lin_vel)
         & (torch.linalg.norm(root_ang_vel, dim=-1) <= max_root_ang_vel)
+        & (env.action_manager.action[env_ids].abs().amax(dim=-1) <= max_action)
     )
     bad_ids = env_ids[~(finite & plausible)]
     if len(bad_ids) == 0:
@@ -185,6 +191,8 @@ class push_robot_by_force(ManagerTermBase):
         push_interval_range_s: tuple[float, float],
         asset_cfg: SceneEntityCfg,
         debug_vis: bool = False,
+        marker_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.5),
+        force_arrow_scale: float = 0.01,
     ) -> None:
         dt = env.step_dt
 
@@ -223,7 +231,7 @@ class push_robot_by_force(ManagerTermBase):
             self._write(active_ids)
 
         if debug_vis and self._force_visualizer is not None:
-            self._update_force_visualization()
+            self._update_force_visualization(marker_pos_offset, force_arrow_scale)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         super().reset(env_ids)
@@ -250,7 +258,11 @@ class push_robot_by_force(ManagerTermBase):
             is_global=True,
         )
 
-    def _update_force_visualization(self) -> None:
+    def _update_force_visualization(
+        self,
+        marker_pos_offset: tuple[float, float, float],
+        force_arrow_scale: float,
+    ) -> None:
         """Draw a red arrow at the robot base for the most recent push of every environment.
 
         The arrow stays visible after a push ends so that the most recent push force keeps being
@@ -269,7 +281,7 @@ class push_robot_by_force(ManagerTermBase):
         force_w = self._last_force_w[shown_ids]
         # place the arrow above the robot base
         offset = torch.tensor(
-            self.cfg.params.get("marker_pos_offset", (0.0, 0.0, 0.5)),
+            marker_pos_offset,
             device=self.device,
             dtype=force_w.dtype,
         )
@@ -280,7 +292,7 @@ class push_robot_by_force(ManagerTermBase):
         # scale the arrow length with the force magnitude
         default_scale = torch.tensor(visualizer.cfg.markers["arrow"].scale, device=self.device, dtype=force_w.dtype)
         scales = default_scale.repeat(len(shown_ids), 1)
-        scales[:, 0] *= torch.linalg.norm(force_w[:, :2], dim=1) * self.cfg.params.get("force_arrow_scale", 0.01)
+        scales[:, 0] *= torch.linalg.norm(force_w[:, :2], dim=1) * force_arrow_scale
 
         visualizer.set_visibility(True)
         visualizer.visualize(

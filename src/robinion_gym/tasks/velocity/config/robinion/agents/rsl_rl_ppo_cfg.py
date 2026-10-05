@@ -13,6 +13,11 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 48
     max_iterations = 4000
     save_interval = 100
+    # Clamp sampled actions before they reach the environment. Without this, a large action
+    # sampled by the Gaussian policy feeds back through the `last_action` observation and can
+    # grow exponentially, producing enormous action-rate penalties that blow up the value
+    # function (and eventually the policy std).
+    clip_actions = 4.0
     experiment_name = "robinion_velocity"
     obs_groups = {"actor": ["actor"], "critic": ["critic"]}
     actor = RslRlMLPModelCfg(
