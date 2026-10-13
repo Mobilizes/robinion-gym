@@ -30,7 +30,7 @@ MPC_HUMANOID_ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__)
 _LEG_PEAK_TORQUE = {
     ".*_hip_yaw_joint": 4.1,
     ".*_hip_roll_joint": 9.9,
-    "right_front_thigh_pitch_joint": 19.8,
+    "right_front_thigh_pitch_joint": 9.9,
     "left_front_thigh_pitch_joint": 9.9,
     ".*_back_thigh_pitch_joint": 19.8,
     ".*_knee_pitch_joint": 19.8,

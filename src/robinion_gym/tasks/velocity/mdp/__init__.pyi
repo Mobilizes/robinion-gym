@@ -17,7 +17,7 @@ __all__ = [
     "joint_pos_target_l2",
     "joint_deviation_l2",
     "base_height_l1",
-    "base_rp_l2",
+    "base_rp_l1",
     "feet_gait",
     "arm_swing_gait",
     "feet_clearance",
@@ -39,7 +39,7 @@ from .observations import gait_phase
 from .rewards import (
     arm_swing_gait,
     base_height_l1,
-    base_rp_l2,
+    base_rp_l1,
     feet_clearance,
     feet_distance,
     feet_flat,
