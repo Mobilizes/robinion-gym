@@ -101,10 +101,10 @@ class CommandsCfg:
         heading_command=False,
         debug_vis=True,
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.25, 0.75), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.25, 0.25)
+            lin_vel_x=(-0.2, 0.6), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.25, 0.25)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.5, 1.5), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.5, 0.5)
+            lin_vel_x=(-0.4, 1.2), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.5, 0.5)
         ),
     )
 
@@ -162,6 +162,18 @@ class ObservationsCfg:
 @configclass
 class EventCfg:
     """Configuration for events."""
+
+    # Set the hard knee lower limit to 0 rad at startup; the zero-width range is deterministic.
+    knee_pitch_lower_limit = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_knee_pitch_joint"]),
+            "lower_limit_distribution_params": (0.0, 0.0),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
 
     reset_all = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -232,7 +244,7 @@ class RewardsCfg:
 
     rew_track_ang_vel = RewTerm(
         func=mdp.track_ang_vel_z_exp,
-        weight=0.5,
+        weight=1.0,
         params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     )
 
@@ -283,10 +295,10 @@ class RewardsCfg:
 
     rew_feet_clearance = RewTerm(
         func=mdp.feet_clearance,
-        weight=5.0,
+        weight=2.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
-            "target_height": 0.05,
+            "target_height": 0.075,
             "std": 0.05,
             "tanh_mult": 2.0,
             "command_name": "base_velocity",
@@ -310,7 +322,7 @@ class RewardsCfg:
     pen_base_height = RewTerm(
         func=mdp.base_height_l2,
         weight=-10.0,
-        params={"target_height": 0.48},
+        params={"target_height": 0.52},
     )
     pen_lin_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     pen_ang_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
@@ -363,7 +375,7 @@ class RewardsCfg:
     )
     pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
     pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
-    pen_flat_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-5.0)
+    pen_flat_orientation = RewTerm(func=mdp.base_rp_l1, weight=-5.0)
 
     pen_feet_slide = RewTerm(
         func=mdp.feet_slide,
@@ -389,14 +401,14 @@ class RewardsCfg:
         params={
             "left_foot_cfg": SceneEntityCfg("robot", body_names="left_foot.*"),
             "right_foot_cfg": SceneEntityCfg("robot", body_names="right_foot.*"),
-            "target_distance": 0.11,
+            "target_distance": 0.13,
             "command_name": "base_velocity",
             "full_gate_vel": 0.3,
         },
     )
     pen_self_collision = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-40.0,
+        weight=-1000.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",

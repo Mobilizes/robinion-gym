@@ -42,6 +42,22 @@ def joint_deviation_l2(
     return torch.sum(torch.square(deviation), dim=-1)
 
 
+def base_rp_l1(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Penalize base roll and pitch deviation from level with an L1 (absolute) kernel.
+
+    The base tilt is read from the x/y components of the projected gravity vector in the base
+    frame, whose absolute values are summed. Unlike
+    :func:`isaaclab.envs.mdp.flat_orientation_l2`, the gradient magnitude stays constant instead
+    of shrinking with the error, so a small but persistent body tilt (for example, the residual
+    lean left after recovering from a push) is corrected as strongly as a large one, driving the
+    base back to level over time.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.abs(asset.data.projected_gravity_b.torch[:, :2]), dim=1)
+
+
 def feet_gait(
     env: ManagerBasedRLEnv,
     period: float,
