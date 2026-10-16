@@ -9,12 +9,15 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, wrap_to_pi
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from isaaclab.assets import Articulation
-    from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
+    from isaaclab.managers import RewardTermCfg
     from isaaclab.sensors import ContactSensor
 
 
@@ -71,6 +74,72 @@ def base_rp_l1(
     """
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.abs(asset.data.projected_gravity_b.torch[:, :2]), dim=1)
+
+
+class stand_still_drift(ManagerTermBase):
+    """Reward the base holding its position while the commanded linear velocity is zero.
+
+    An environment that is commanded to walk in place keeps stepping, so its base velocity
+    oscillates with every step even when the stride has no net bias. Rewarding the instantaneous
+    base velocity would fight that oscillation, so this term low-pass filters the base xy velocity
+    (first-order exponential moving average) and applies an exponential kernel to the filtered
+    value: only the slowly varying part of the motion, the drift that makes the robot wander, is
+    measured, while the per-step oscillation is averaged out.
+
+    The filter is restarted whenever the commanded linear velocity becomes (near) zero and on
+    episode reset, so a previous walking state does not leak into the standing window. The term is
+    zero for environments that are commanded to translate (``lin_vel_x``/``lin_vel_y`` above
+    ``command_threshold``); turning-in-place commands (zero linear velocity) are anchored as well,
+    since they should not translate either.
+
+    Args:
+        command_name: Name of the command term providing the velocity command.
+        asset_cfg: The articulation whose base velocity is tracked.
+        std: Standard deviation (m/s) of the exponential kernel; smaller values penalize drift harder.
+        time_constant: Time constant (s) of the low-pass filter. Must be well above the gait period
+            so the per-step oscillation is averaged out; around 1 s works for the 0.4 s gait clock.
+        command_threshold: Linear command norm (m/s) below which the term is active.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset: Articulation = env.scene[cfg.params["asset_cfg"].name]
+        # filtered base xy velocity (m/s) and standing mask, both per environment
+        self._filtered_vel = torch.zeros(env.num_envs, 2, device=env.device)
+        self._standing = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        std: float = 0.05,
+        time_constant: float = 1.0,
+        command_threshold: float = 1.0e-3,
+    ) -> torch.Tensor:
+        vel_xy = self._asset.data.root_lin_vel_b.torch[:, :2]
+        cmd_xy = env.command_manager.get_command(command_name)[:, :2]
+        standing = torch.norm(cmd_xy, dim=-1) <= command_threshold
+        # restart the filter when the command becomes standing
+        restart = standing & ~self._standing
+        self._filtered_vel[restart] = 0.0
+        # only update while standing; the mask also replaces the stored value elsewhere
+        alpha = min(env.step_dt / time_constant, 1.0)
+        self._filtered_vel = torch.where(
+            standing.unsqueeze(-1),
+            self._filtered_vel + alpha * (vel_xy - self._filtered_vel),
+            self._filtered_vel,
+        )
+        self._standing = standing
+
+        error = torch.sum(torch.square(self._filtered_vel), dim=-1)
+        return standing.float() * torch.exp(-error / std**2)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        super().reset(env_ids)
+        env_ids = slice(None) if env_ids is None else env_ids
+        self._filtered_vel[env_ids] = 0.0
+        self._standing[env_ids] = False
 
 
 def feet_gait(

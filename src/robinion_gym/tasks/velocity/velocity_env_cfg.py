@@ -11,6 +11,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp import (
     projected_gravity,
 )
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -96,7 +97,7 @@ class CommandsCfg:
     base_velocity = mdp.UniformLevelVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.02,
+        rel_standing_envs=0.05,
         rel_heading_envs=1.0,
         heading_command=False,
         debug_vis=True,
@@ -159,6 +160,12 @@ class ObservationsCfg:
     critic: CriticCfg = CriticCfg()
 
 
+# Push strength (base velocity change, m/s) used in training: the curriculum ramps from no push up
+# to this range. The event default is kept on the same value so a rollout without the curriculum
+# (play mode, tests) never shoves the robot harder than the policy was trained for.
+_PUSH_VELOCITY_RANGE: dict[str, tuple[float, float]] = {"x": (-0.4, 0.4), "y": (-0.4, 0.4)}
+
+
 @configclass
 class EventCfg:
     """Configuration for events."""
@@ -207,11 +214,9 @@ class EventCfg:
         interval_range_s=(0.0, 0.0),
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "velocity_range": {"x": (-1.5, 1.5), "y": (-1.5, 1.5)},
+            "velocity_range": dict(_PUSH_VELOCITY_RANGE),
             "duration_s": 0.2,
             "push_interval_range_s": (4.0, 6.0),
-            # draw a red arrow for the push force; the gain enlarges the arrow only,
-            # the applied push force/velocity is unchanged
             "debug_vis": True,
             "force_arrow_scale": 0.05,
         },
@@ -253,6 +258,20 @@ class RewardsCfg:
     )
 
     rew_alive = RewTerm(func=mdp.is_alive, weight=0.15)
+
+    # keep the zero-command march in place: unlike the instantaneous velocity, this term measures
+    # only the low-pass filtered (netted) base motion, so the step oscillation is free while a
+    # steady forward/lateral drift is driven to zero
+    rew_stand_still = RewTerm(
+        func=mdp.stand_still_drift,
+        weight=0.75,
+        params={
+            "command_name": "base_velocity",
+            "std": 0.05,
+            "time_constant": 1.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
 
     # rew_feet_flat_contact = RewTerm(
     #     func=mdp.feet_flat_contact,
@@ -326,7 +345,7 @@ class RewardsCfg:
     pen_base_height = RewTerm(
         func=mdp.base_height_l1,
         weight=-10.0,
-        params={"target_height": 0.52},
+        params={"target_height": 0.54},
     )
     pen_lin_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     pen_ang_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
@@ -377,7 +396,7 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_roll_joint")
         },
     )
-    pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
+    pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-10.0)
     pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
     pen_flat_orientation = RewTerm(func=mdp.base_rp_l1, weight=-5.0)
 
@@ -405,7 +424,7 @@ class RewardsCfg:
         params={
             "left_foot_cfg": SceneEntityCfg("robot", body_names="left_foot.*"),
             "right_foot_cfg": SceneEntityCfg("robot", body_names="right_foot.*"),
-            "target_distance": 0.13,
+            "target_distance": 0.12,
             "command_name": "base_velocity",
             "full_gate_vel": 0.3,
         },
@@ -433,6 +452,27 @@ class TerminationsCfg:
     )
 
 
+@configclass
+class CurriculumCfg:
+    """Curriculum terms for the MDP."""
+
+    # Stage the push disturbance: the full shove arrives before the policy can recover from it
+    # (every episode then ends at its first push), so start with no shove and ramp linearly to the
+    # trained range. The ramp is keyed on environment steps: 48 steps = 1 iteration, so 240000
+    # steps is ~5000 iterations to reach the full shove. Progress is logged under
+    # "Curriculum/push_velocity_ramp".
+    push_velocity_ramp = CurrTerm(
+        func=mdp.push_velocity_range_ramp,
+        params={
+            "event_name": "push_robot",
+            "initial_range": {"x": (-0.0, 0.0), "y": (-0.0, 0.0)},
+            "final_range": dict(_PUSH_VELOCITY_RANGE),
+            "start_step": 48000,
+            "end_step": 300000,
+        },
+    )
+
+
 ##
 # Environment configuration
 ##
@@ -452,6 +492,7 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     events: EventCfg = EventCfg()
     terminations: TerminationsCfg = TerminationsCfg()
+    curriculum: CurriculumCfg = CurriculumCfg()
 
     # Post initialization
     def __post_init__(self) -> None:
@@ -461,14 +502,21 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
-        self.sim.dt = 1 / 200
+        self.sim.dt = 1 / 400
         self.sim.render_interval = self.decimation
         self.sim.physics = RobinionPhysicsCfg()
         # tick the contact sensor with the physics step so it samples at 200 Hz
         self.scene.contact_forces.update_period = self.sim.dt
 
     def play_mode(self) -> None:
-        """Play-mode overrides: play with the full velocity command range."""
+        """Play-mode overrides: play with the full velocity command range and the trained push force."""
         super().play_mode()
         # use the full command range instead of the curriculum's initial level
         self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+        # skip the push ramp but keep the shove at the strength the curriculum reaches in training;
+        # removing the term alone would leave the event at its default range, which the policy has
+        # never seen
+        push_ramp = self.curriculum.push_velocity_ramp
+        if push_ramp is not None:
+            self.events.push_robot.params["velocity_range"] = dict(push_ramp.params["final_range"])
+        self.curriculum.push_velocity_ramp = None

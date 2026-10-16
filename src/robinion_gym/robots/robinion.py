@@ -1,4 +1,4 @@
-"""Robinion v2 humanoid: mixed Dynamixel X-series servos, parallelogram legs, 12.0 V bus."""
+"""Robinion v2 humanoid: mixed Dynamixel X-series servos, parallelogram legs, 14.8 V bus."""
 
 from __future__ import annotations
 
@@ -8,56 +8,56 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg
 from isaaclab.assets import ArticulationCfg
 
-MPC_HUMANOID_ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../assets"))
+HUMANOID_ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../assets"))
 
 ##
 # Servo peak torque
 ##
-# The URDF groups the 29 joints into four servo ratings by peak torque [N·m]:
-#   4.1  -> hip yaw, head, elbow yaw
-#   9.9  -> hip roll, shins, ankles, left front thigh
-#  10.6  -> torso, shoulders, elbow pitch
-#  19.8  -> knees, back thighs, right front thigh (parallelogram pair)
+# The URDF takes every joint's effort limit from robinion_description/config/actuators.yaml, which maps
+# each joint to a DYNAMIXEL model and to the number of servos driving it in parallel. The peak torques
+# below are that file's `effort` values at 14.8 V, multiplied by the servo count [N·m]:
+#   XM430-W350      4.8 -> head, elbow yaw
+#   XH540-W270     11.7 -> hip roll, front shins, ankles
+#   XM540-W270     12.9 -> torso, hip yaw, shoulders, elbow pitch
+#   XH540-W270 x2  23.4 -> front thighs, knees (two servos per joint)
+# The two parallel-link bars (back thigh, back shin) are not mapped to a servo in that file; the URDF
+# hardcodes 19.8 and 9.9 N·m for them and the same values are repeated here.
+#
 # The converted USD carries the URDF velocity limits, so Isaac Lab reads those automatically and
 # they are not repeated here. It does not expose the URDF effort limits (the PhysX drive max force
 # is unset, so the joint effort limit resolves to zero), so the effort limits and the DC-motor
 # stall torque (`saturation_effort`) are declared here from the URDF.
-#
-# NOTE: the URDF lists the right front thigh at 19.8 N·m and the left at 9.9 N·m even though the
-# two front thighs are the same servo in the parallelogram linkage. The asymmetry is preserved
-# here to match the URDF; change it if the URDF is corrected.
 
 _LEG_PEAK_TORQUE = {
-    ".*_hip_yaw_joint": 4.1,
-    ".*_hip_roll_joint": 9.9,
-    "right_front_thigh_pitch_joint": 9.9,
-    "left_front_thigh_pitch_joint": 9.9,
+    ".*_hip_yaw_joint": 12.9,
+    ".*_hip_roll_joint": 11.7,
+    ".*_front_thigh_pitch_joint": 23.4,
     ".*_back_thigh_pitch_joint": 19.8,
-    ".*_knee_pitch_joint": 19.8,
-    ".*_front_shin_pitch_joint": 9.9,
+    ".*_knee_pitch_joint": 23.4,
+    ".*_front_shin_pitch_joint": 11.7,
     ".*_back_shin_pitch_joint": 9.9,
-    ".*_ankle_pitch_joint": 9.9,
-    ".*_ankle_roll_joint": 9.9,
+    ".*_ankle_pitch_joint": 11.7,
+    ".*_ankle_roll_joint": 11.7,
 }
 
 _TORSO_ARM_PEAK_TORQUE = {
-    "torso_pitch_joint": 10.6,
-    ".*_shoulder_pitch_joint": 10.6,
-    ".*_shoulder_roll_joint": 10.6,
-    ".*_elbow_yaw_joint": 4.1,
-    ".*_elbow_pitch_joint": 10.6,
+    "torso_pitch_joint": 12.9,
+    ".*_shoulder_pitch_joint": 12.9,
+    ".*_shoulder_roll_joint": 12.9,
+    ".*_elbow_yaw_joint": 4.8,
+    ".*_elbow_pitch_joint": 12.9,
 }
 
 _HEAD_PEAK_TORQUE = {
-    "head_yaw_joint": 4.1,
-    "head_pitch_joint": 4.1,
+    "head_yaw_joint": 4.8,
+    "head_pitch_joint": 4.8,
 }
 
 ##
 # Position-control gains
 ##
 # The URDF does not publish controller gains, so the stiffness/damping are chosen as follows:
-#   * stiffness: reach roughly the servo's peak torque at a 0.1-0.2 rad tracking error, scaled
+#   * stiffness: reach roughly the servo's peak torque at a 0.1-0.25 rad tracking error, scaled
 #     down for the arms and head where accurate positioning matters less than compliance.
 #   * damping: near critical (zeta ~ 0.8-1.0) for a representative effective link inertia, with
 #     extra damping on the ankle joints to keep foot contacts quiet.
@@ -113,19 +113,50 @@ _HEAD_DAMPING = {
     "head_pitch_joint": 0.4,
 }
 
-# Reflected rotor inertia (J_rotor * gear_ratio^2); rotor inertia is not published, this is an
-# estimate used to stabilize the joint-space inertia.
-_ARMATURE = 0.02
+##
+# Armature
+##
+# Reflected rotor inertia (J_rotor * gear_ratio^2) from config/actuators.yaml, which carries the same
+# 0.038 kg·m^2 prior for all three servo models. Joints driven by two servos in parallel carry twice
+# that. It is added to the joint-space inertia to stabilize the joint velocities.
+_SERVO_ARMATURE = 0.038
+_DUAL_SERVO_ARMATURE = 2.0 * _SERVO_ARMATURE
 
-# Standing crouch of the parallelogram legs. The USD models the linkage as independent
-# revolute joints (no closed loop), so the knee/back-thigh/shin joints are actuated together
-# with the front thigh rather than left passive.
+_LEG_ARMATURE = {
+    ".*_hip_yaw_joint": _SERVO_ARMATURE,
+    ".*_hip_roll_joint": _SERVO_ARMATURE,
+    ".*_front_thigh_pitch_joint": _DUAL_SERVO_ARMATURE,
+    ".*_back_thigh_pitch_joint": _SERVO_ARMATURE,
+    ".*_knee_pitch_joint": _DUAL_SERVO_ARMATURE,
+    ".*_front_shin_pitch_joint": _SERVO_ARMATURE,
+    ".*_back_shin_pitch_joint": _SERVO_ARMATURE,
+    ".*_ankle_pitch_joint": _SERVO_ARMATURE,
+    ".*_ankle_roll_joint": _SERVO_ARMATURE,
+}
+
+_TORSO_ARM_ARMATURE = {
+    "torso_pitch_joint": _SERVO_ARMATURE,
+    ".*_shoulder_pitch_joint": _SERVO_ARMATURE,
+    ".*_shoulder_roll_joint": _SERVO_ARMATURE,
+    ".*_elbow_yaw_joint": _SERVO_ARMATURE,
+    ".*_elbow_pitch_joint": _SERVO_ARMATURE,
+}
+
+_HEAD_ARMATURE = {
+    "head_yaw_joint": _SERVO_ARMATURE,
+    "head_pitch_joint": _SERVO_ARMATURE,
+}
+
+# Standing crouch of the parallelogram legs. The asset closes the linkage with loop joints, so the
+# back-thigh/back-shin bars follow the links they are tied to; the environment still commands the bar
+# joints because they are part of the articulated tree the URDF describes, so all of them take the
+# crouch.
 _LEG_CROUCH = 0.0  # rad
 
 ROBINION_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{MPC_HUMANOID_ASSETS_DIR}/robonionv2.usd",
+        usd_path=f"{HUMANOID_ASSETS_DIR}/robonionv2.usd",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -182,7 +213,7 @@ ROBINION_CFG = ArticulationCfg(
             joint_effort_limit=_LEG_PEAK_TORQUE,
             stiffness=_LEG_STIFFNESS,
             damping=_LEG_DAMPING,
-            armature=_ARMATURE,
+            armature=_LEG_ARMATURE,
         ),
         "torso_arms": DCMotorCfg(
             joint_names_expr=[
@@ -197,7 +228,7 @@ ROBINION_CFG = ArticulationCfg(
             joint_effort_limit=_TORSO_ARM_PEAK_TORQUE,
             stiffness=_TORSO_ARM_STIFFNESS,
             damping=_TORSO_ARM_DAMPING,
-            armature=_ARMATURE,
+            armature=_TORSO_ARM_ARMATURE,
         ),
         "head": DCMotorCfg(
             joint_names_expr=["head_yaw_joint", "head_pitch_joint"],
@@ -206,7 +237,7 @@ ROBINION_CFG = ArticulationCfg(
             joint_effort_limit=_HEAD_PEAK_TORQUE,
             stiffness=_HEAD_STIFFNESS,
             damping=_HEAD_DAMPING,
-            armature=_ARMATURE,
+            armature=_HEAD_ARMATURE,
         ),
     },
 )

@@ -11,7 +11,7 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 48
-    max_iterations = 4000
+    max_iterations = 10000
     save_interval = 100
     # Clamp sampled actions before they reach the environment. Without this, a large action
     # sampled by the Gaussian policy feeds back through the `last_action` observation and can
