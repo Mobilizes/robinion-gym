@@ -16,6 +16,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Isaac Lab Project Developers" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "better-actuator-models",
     "isaaclab-dev[rsl-rl]",
 ]
 
@@ -54,6 +55,7 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
+"better-actuator-models" = { path = "../move_actuator/bam-xseries", editable = true }
 "isaaclab" = { path = "../../IsaacLab/source/isaaclab", editable = true }
 "isaaclab-assets" = { path = "../../IsaacLab/source/isaaclab_assets", editable = true }
 "isaaclab-contrib" = { path = "../../IsaacLab/source/isaaclab_contrib", editable = true }

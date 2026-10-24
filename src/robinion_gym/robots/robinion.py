@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg
+from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 HUMANOID_ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../assets"))
@@ -20,8 +20,9 @@ HUMANOID_ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".
 #   XH540-W270     11.7 -> hip roll, front shins, ankles
 #   XM540-W270     12.9 -> torso, hip yaw, shoulders, elbow pitch
 #   XH540-W270 x2  23.4 -> front thighs, knees (two servos per joint)
-# The two parallel-link bars (back thigh, back shin) are not mapped to a servo in that file; the URDF
-# hardcodes 19.8 and 9.9 N·m for them and the same values are repeated here.
+# The two parallel-link bars (back thigh, back shin) are not mapped to a servo in that file and are
+# passive on the real robot. The USD closes their parallelogram with loop joints, so they follow the
+# driven links and must not be commanded or driven here.
 #
 # The converted USD carries the URDF velocity limits, so Isaac Lab reads those automatically and
 # they are not repeated here. It does not expose the URDF effort limits (the PhysX drive max force
@@ -32,10 +33,8 @@ _LEG_PEAK_TORQUE = {
     ".*_hip_yaw_joint": 12.9,
     ".*_hip_roll_joint": 11.7,
     ".*_front_thigh_pitch_joint": 23.4,
-    ".*_back_thigh_pitch_joint": 19.8,
     ".*_knee_pitch_joint": 23.4,
     ".*_front_shin_pitch_joint": 11.7,
-    ".*_back_shin_pitch_joint": 9.9,
     ".*_ankle_pitch_joint": 11.7,
     ".*_ankle_roll_joint": 11.7,
 }
@@ -67,10 +66,8 @@ _LEG_STIFFNESS = {
     ".*_hip_yaw_joint": 60.0,
     ".*_hip_roll_joint": 90.0,
     ".*_front_thigh_pitch_joint": 100.0,
-    ".*_back_thigh_pitch_joint": 100.0,
     ".*_knee_pitch_joint": 120.0,
     ".*_front_shin_pitch_joint": 80.0,
-    ".*_back_shin_pitch_joint": 80.0,
     ".*_ankle_pitch_joint": 60.0,
     ".*_ankle_roll_joint": 50.0,
 }
@@ -79,10 +76,8 @@ _LEG_DAMPING = {
     ".*_hip_yaw_joint": 1.5,
     ".*_hip_roll_joint": 2.2,
     ".*_front_thigh_pitch_joint": 2.5,
-    ".*_back_thigh_pitch_joint": 2.5,
     ".*_knee_pitch_joint": 3.0,
     ".*_front_shin_pitch_joint": 2.0,
-    ".*_back_shin_pitch_joint": 2.0,
     ".*_ankle_pitch_joint": 1.5,
     ".*_ankle_roll_joint": 1.2,
 }
@@ -126,10 +121,8 @@ _LEG_ARMATURE = {
     ".*_hip_yaw_joint": _SERVO_ARMATURE,
     ".*_hip_roll_joint": _SERVO_ARMATURE,
     ".*_front_thigh_pitch_joint": _DUAL_SERVO_ARMATURE,
-    ".*_back_thigh_pitch_joint": _SERVO_ARMATURE,
     ".*_knee_pitch_joint": _DUAL_SERVO_ARMATURE,
     ".*_front_shin_pitch_joint": _SERVO_ARMATURE,
-    ".*_back_shin_pitch_joint": _SERVO_ARMATURE,
     ".*_ankle_pitch_joint": _SERVO_ARMATURE,
     ".*_ankle_roll_joint": _SERVO_ARMATURE,
 }
@@ -148,9 +141,9 @@ _HEAD_ARMATURE = {
 }
 
 # Standing crouch of the parallelogram legs. The asset closes the linkage with loop joints, so the
-# back-thigh/back-shin bars follow the links they are tied to; the environment still commands the bar
-# joints because they are part of the articulated tree the URDF describes, so all of them take the
-# crouch.
+# back-thigh/back-shin bars follow the links they are tied to. They are passive: they are not part of
+# the action space and carry no drive. Their initial angles still match the front chain so the loop
+# starts closed.
 _LEG_CROUCH = 0.0  # rad
 
 ROBINION_CFG = ArticulationCfg(
@@ -201,10 +194,8 @@ ROBINION_CFG = ArticulationCfg(
                 ".*_hip_yaw_joint",
                 ".*_hip_roll_joint",
                 ".*_front_thigh_pitch_joint",
-                ".*_back_thigh_pitch_joint",
                 ".*_knee_pitch_joint",
                 ".*_front_shin_pitch_joint",
-                ".*_back_shin_pitch_joint",
                 ".*_ankle_pitch_joint",
                 ".*_ankle_roll_joint",
             ],
@@ -214,6 +205,16 @@ ROBINION_CFG = ArticulationCfg(
             stiffness=_LEG_STIFFNESS,
             damping=_LEG_DAMPING,
             armature=_LEG_ARMATURE,
+        ),
+        # The parallelogram bars are unactuated on the real robot. The loop joints in the USD hold
+        # them on the driven links, so they must not receive a position command or drive effort.
+        "passive_bars": ImplicitActuatorCfg(
+            joint_names_expr=[".*_back_thigh_pitch_joint", ".*_back_shin_pitch_joint"],
+            stiffness=0.0,
+            damping=0.0,
+            actuator_effort_limit=0.0,
+            joint_effort_limit=0.0,
+            armature=0.0,
         ),
         "torso_arms": DCMotorCfg(
             joint_names_expr=[

@@ -84,8 +84,13 @@ class ActionsCfg:
 
     joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
-        joint_names=["^(?!head).*"],
-        scale=0.5,
+        joint_names=[
+            "^(?!head)(?!.*_back_thigh_pitch_joint)(?!.*_back_shin_pitch_joint)(?!.*_elbow_.*_joint).*"
+        ],
+        # Full normalized action range is 1.2 rad. The policy needs this range for
+        # balance-recovery steps; the std cap and floor keep exploration from running away,
+        # so the clip is a guardrail rather than the primary gait constraint.
+        scale=1.0,
         use_default_offset=True,
     )
 
@@ -101,11 +106,15 @@ class CommandsCfg:
         rel_heading_envs=1.0,
         heading_command=False,
         debug_vis=True,
+        # Level 0 is the comfortable range every environment starts in; the level
+        # curriculum ramps toward limit_ranges as tracking improves. Keep the fast end out
+        # of the level-0 range, otherwise every environment is asked to sprint from the
+        # first step and the policy learns an unstable forward lean.
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.2, 0.6), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.25, 0.25)
+            lin_vel_x=(-0.2, 0.3), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.2, 0.2)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.4, 1.2), lin_vel_y=(-0.2, 0.2), ang_vel_z=(-0.5, 0.5)
+            lin_vel_x=(-0.4, 0.6), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.4, 0.4)
         ),
     )
 
@@ -120,13 +129,21 @@ class ObservationsCfg:
 
         # base_height = ObsTerm(func=mdp.base_pos_z)
         # base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25, noise=Unoise(n_min=-0.01, n_max=0.01))
-        projected_gravity = ObsTerm(func=projected_gravity, noise=Unoise(n_min=-0.01, n_max=0.01))
+        base_ang_vel = ObsTerm(
+            func=mdp.base_ang_vel, scale=0.25, noise=Unoise(n_min=-0.01, n_max=0.01)
+        )
+        projected_gravity = ObsTerm(
+            func=projected_gravity, noise=Unoise(n_min=-0.01, n_max=0.01)
+        )
         velocity_commands = ObsTerm(
             func=mdp.generated_commands, params={"command_name": "base_velocity"}
         )
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.05, n_max=0.05))
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1, noise=Unoise(n_min=-0.1, n_max=0.1))
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.05, n_max=0.05)
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel, scale=0.1, noise=Unoise(n_min=-0.1, n_max=0.1)
+        )
         gait_phase = ObsTerm(
             func=mdp.gait_phase, params={"period": 0.4, "offset": [0.0, 0.5]}
         )
@@ -163,7 +180,10 @@ class ObservationsCfg:
 # Push strength (base velocity change, m/s) used in training: the curriculum ramps from no push up
 # to this range. The event default is kept on the same value so a rollout without the curriculum
 # (play mode, tests) never shoves the robot harder than the policy was trained for.
-_PUSH_VELOCITY_RANGE: dict[str, tuple[float, float]] = {"x": (-0.4, 0.4), "y": (-0.4, 0.4)}
+_PUSH_VELOCITY_RANGE: dict[str, tuple[float, float]] = {
+    "x": (-0.4, 0.4),
+    "y": (-0.4, 0.4),
+}
 
 
 @configclass
@@ -247,31 +267,33 @@ class RewardsCfg:
 
     rew_track_lin_vel = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
-        weight=1.5,
+        weight=3.0,
         params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     )
 
     rew_track_ang_vel = RewTerm(
         func=mdp.track_ang_vel_z_exp,
-        weight=1.0,
+        weight=2.0,
         params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     )
 
-    rew_alive = RewTerm(func=mdp.is_alive, weight=0.15)
+    rew_alive = RewTerm(func=mdp.is_alive, weight=0.5)
 
-    # keep the zero-command march in place: unlike the instantaneous velocity, this term measures
-    # only the low-pass filtered (netted) base motion, so the step oscillation is free while a
-    # steady forward/lateral drift is driven to zero
-    rew_stand_still = RewTerm(
-        func=mdp.stand_still_drift,
-        weight=0.75,
-        params={
-            "command_name": "base_velocity",
-            "std": 0.05,
-            "time_constant": 1.0,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
+    # Falling ends the episode; without a direct cost the policy can trade a short unstable
+    # episode for a higher instantaneous tracking reward. Keep this moderate so standing
+    # still is still worse than walking.
+    pen_termination = RewTerm(func=mdp.is_terminated, weight=-20.0)
+
+    # rew_stand_still = RewTerm(
+    #     func=mdp.stand_still_drift,
+    #     weight=0.75,
+    #     params={
+    #         "command_name": "base_velocity",
+    #         "std": 0.05,
+    #         "time_constant": 1.0,
+    #         "asset_cfg": SceneEntityCfg("robot"),
+    #     },
+    # )
 
     # rew_feet_flat_contact = RewTerm(
     #     func=mdp.feet_flat_contact,
@@ -289,19 +311,19 @@ class RewardsCfg:
 
     rew_feet_flat = RewTerm(
         func=mdp.feet_flat,
-        weight=0.5,
+        weight=1.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
     )
 
-    rew_feet_air_time = RewTerm(
-        func=mdp.feet_air_time_positive_biped,
-        weight=1.0,
-        params={
-            "command_name": "base_velocity",
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
-            "threshold": 0.4,
-        },
-    )
+    # rew_feet_air_time = RewTerm(
+    #     func=mdp.feet_air_time_positive_biped,
+    #     weight=1.0,
+    #     params={
+    #         "command_name": "base_velocity",
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+    #         "threshold": 0.4,
+    #     },
+    # )
 
     rew_feet_gait = RewTerm(
         func=mdp.feet_gait,
@@ -316,12 +338,25 @@ class RewardsCfg:
         },
     )
 
+    # rew_feet_stance = RewTerm(
+    #     func=mdp.feet_stance,
+    #     weight=2.0,
+    #     params={
+    #         "period": 0.4,
+    #         "offset": [0.0, 0.5],
+    #         "swing_center": 0.25,
+    #         "swing_period": 0.4,
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+    #         "command_name": "base_velocity",
+    #     },
+    # )
+
     rew_feet_clearance = RewTerm(
         func=mdp.feet_clearance,
-        weight=2.0,
+        weight=4.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
-            "target_height": 0.075,
+            "min_height": 0.075,
             "std": 0.05,
             "tanh_mult": 2.0,
             "command_name": "base_velocity",
@@ -345,7 +380,7 @@ class RewardsCfg:
     pen_base_height = RewTerm(
         func=mdp.base_height_l1,
         weight=-10.0,
-        params={"target_height": 0.54},
+        params={"target_height": 0.535},
     )
     pen_lin_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     pen_ang_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
@@ -359,6 +394,24 @@ class RewardsCfg:
         func=mdp.joint_acc_l2,
         weight=-1e-7,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+    )
+    pen_ankle_deviation = RewTerm(
+        func=mdp.joint_deviation_l2,
+        weight=-4.0,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
+            )
+        },
+    )
+    pen_ankle_vel = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-0.01,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
+            )
+        },
     )
     # pen_arm_vel = RewTerm(
     #     func=mdp.joint_vel_l2,
@@ -397,8 +450,8 @@ class RewardsCfg:
         },
     )
     pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-10.0)
-    pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
-    pen_flat_orientation = RewTerm(func=mdp.base_rp_l1, weight=-5.0)
+    # pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
+    pen_flat_orientation = RewTerm(func=mdp.base_rp_l1, weight=-10.0)
 
     pen_feet_slide = RewTerm(
         func=mdp.feet_slide,
@@ -429,16 +482,11 @@ class RewardsCfg:
             "full_gate_vel": 0.3,
         },
     )
+
     pen_self_collision = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1000.0,
-        params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                body_names=[".*thigh.*", ".*shin.*", ".*knee.*", ".*hip.*"],
-            ),
-            "threshold": 1.0,
-        },
+        func=mdp.is_terminated_term,
+        weight=-1e6,
+        params={"term_keys": ["term_self_collision"]},
     )
 
 
@@ -449,6 +497,27 @@ class TerminationsCfg:
     term_timeout = DoneTerm(func=mdp.time_out, time_out=True)
     term_height = DoneTerm(
         func=mdp.root_height_below_minimum, params={"minimum_height": 0.2}
+    )
+    term_self_collision = DoneTerm(
+        func=mdp.illegal_contact,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=[
+                    ".*thigh.*",
+                    ".*shin.*",
+                    ".*knee.*",
+                    ".*hip.*",
+                    ".*elbow.*",
+                    ".*shoulder.*",
+                    ".*gripper.*",
+                    ".*upper_body.*",
+                    ".*lower_body.*",
+                    ".*head.*",
+                ],
+            ),
+            "threshold": 1.0,
+        },
     )
 
 
@@ -518,5 +587,7 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
         # never seen
         push_ramp = self.curriculum.push_velocity_ramp
         if push_ramp is not None:
-            self.events.push_robot.params["velocity_range"] = dict(push_ramp.params["final_range"])
+            self.events.push_robot.params["velocity_range"] = dict(
+                push_ramp.params["final_range"]
+            )
         self.curriculum.push_velocity_ramp = None

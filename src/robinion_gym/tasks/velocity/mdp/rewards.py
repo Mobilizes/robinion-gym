@@ -184,6 +184,53 @@ def feet_gait(
     return reward
 
 
+def feet_stance(
+    env: ManagerBasedRLEnv,
+    period: float,
+    offset: list[float],
+    sensor_cfg: SceneEntityCfg,
+    swing_center: float = 0.25,
+    swing_period: float = 0.4,
+    force_threshold: float = 5.0,
+    command_name=None,
+) -> torch.Tensor:
+    """Reward feet for being planted during their expected stance phase.
+
+    For each foot, the reward is one while the foot is inside its support (stance) window and in
+    contact with the ground. This complements :func:`feet_gait`, which rewards the opposite
+    (swing) window, so a gait with a flight phase (both feet airborne) loses the support reward
+    instead of getting the swing reward for free.
+
+    If the commands are small (i.e. the agent is not supposed to walk), then the reward is zero.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    is_contact = (
+        torch.norm(
+            contact_sensor.data.net_forces_w.torch[:, sensor_cfg.body_ids], dim=-1
+        )
+        > force_threshold
+    )
+
+    global_phase = ((env.episode_length_buf * env.step_dt) % period / period).unsqueeze(
+        1
+    )
+    phases = []
+    for offset_ in offset:
+        phase = (global_phase + offset_) % 1.0
+        phases.append(phase)
+    leg_phase = torch.cat(phases, dim=-1)
+
+    # support is the complement of the swing window used by feet_gait
+    in_swing_window = torch.abs(leg_phase - swing_center) < 0.5 * swing_period
+
+    reward = torch.sum((~in_swing_window & is_contact).float(), dim=-1)
+
+    if command_name is not None:
+        cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
+        reward *= cmd_norm > 1.0e-8
+    return reward
+
+
 def arm_swing_gait(
     env: ManagerBasedRLEnv,
     period: float,
@@ -228,25 +275,25 @@ def arm_swing_gait(
 def feet_clearance(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
-    target_height: float,
+    min_height: float,
     std: float,
     tanh_mult: float,
     command_name: str | None = None,
 ) -> torch.Tensor:
-    """Reward the swinging feet for clearing a specified height off the ground.
+    """Reward the swinging feet for clearing at least ``min_height`` off the ground.
 
-    The reward is high when each foot is near ``target_height`` while moving horizontally, so it
-    only shapes the swing (moving) foot and leaves planted feet unpenalized.
+    Only the shortfall below ``min_height`` is penalized, and only while the foot moves
+    horizontally, so a swinging foot is free to lift higher than the minimum and a planted foot is
+    left unpenalized.
     """
     asset: Articulation = env.scene[asset_cfg.name]
-    foot_z_target_error = torch.square(
-        asset.data.body_pos_w.torch[:, asset_cfg.body_ids, 2] - target_height
-    )
+    foot_z = asset.data.body_pos_w.torch[:, asset_cfg.body_ids, 2]
+    foot_z_shortfall = torch.square(torch.clamp(min_height - foot_z, min=0.0))
     foot_velocity_tanh = torch.tanh(
         tanh_mult
         * torch.norm(asset.data.body_lin_vel_w.torch[:, asset_cfg.body_ids, :2], dim=2)
     )
-    reward = foot_z_target_error * foot_velocity_tanh
+    reward = foot_z_shortfall * foot_velocity_tanh
     reward = torch.exp(-torch.sum(reward, dim=1) / std)
 
     if command_name is not None:
@@ -364,6 +411,42 @@ def feet_yaw_mean(
     return torch.square(
         (base_yaw - feet_yaw_mean + torch.pi) % (2 * torch.pi) - torch.pi
     )
+
+
+def feet_ahead_of_base(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    margin: float = 0.0,
+) -> torch.Tensor:
+    """Penalize the leg assembly being placed in front of the base.
+
+    The forward (base-frame x) offset of each foot from the base is computed in the base heading
+    frame, ignoring roll and pitch. The penalty is the forward offset of the rearmost foot beyond
+    ``margin``, so it is zero while the trailing foot is behind or under the base, which is the
+    case for every normal alternating gait, and only grows when both feet are in front of the
+    base (for example, a robot sitting back with its legs stretched forward). This does not limit
+    the step length: a swing foot may reach as far forward as it likes as long as the other foot
+    is still behind the body.
+
+    Args:
+        asset_cfg: The articulation and the foot bodies whose forward offset is measured.
+        margin: Allowed forward offset (m) of the rearmost foot before the penalty starts.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    foot_pos = asset.data.body_pos_w.torch[:, asset_cfg.body_ids, :2]
+    base_pos = asset.data.root_pos_w.torch[:, :2]
+    base_yaw = euler_xyz_from_quat(asset.data.root_quat_w.torch)[2]
+
+    # forward offset of each foot along the base heading (yaw only)
+    delta = foot_pos - base_pos.unsqueeze(1)
+    forward = (
+        torch.cos(base_yaw).unsqueeze(1) * delta[..., 0]
+        + torch.sin(base_yaw).unsqueeze(1) * delta[..., 1]
+    )
+
+    # the trailing foot is the one that must stay behind the body
+    trailing = torch.min(forward, dim=-1).values
+    return torch.clamp(trailing - margin, min=0.0)
 
 
 def feet_distance(

@@ -22,6 +22,7 @@ __all__ = [
     "base_rp_l1",
     "stand_still_drift",
     "feet_gait",
+    "feet_stance",
     "arm_swing_gait",
     "feet_clearance",
     "feet_flat",
@@ -29,6 +30,7 @@ __all__ = [
     "feet_yaw_diff",
     "feet_yaw_mean",
     "feet_distance",
+    "feet_ahead_of_base",
 ]
 
 # Forward stable MDP terms lazily, then override with environment-specific terms below.
@@ -44,11 +46,13 @@ from .rewards import (
     arm_swing_gait,
     base_height_l1,
     base_rp_l1,
+    feet_ahead_of_base,
     feet_clearance,
     feet_distance,
     feet_flat,
     feet_flat_contact,
     feet_gait,
+    feet_stance,
     feet_yaw_diff,
     feet_yaw_mean,
     joint_deviation_l2,

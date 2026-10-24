@@ -57,6 +57,37 @@ uv run isaaclab benchmark training --rl_library <RL_LIBRARY> --task <TASK_NAME> 
 
 Use `physics=<PRESET>` to select one of the presets shown by `list_envs.py`.
 
+### Play one environment and publish actions over ROS 2
+
+`scripts/play_ros2.py` runs the `play` workflow with exactly one environment and publishes the commands applied to that
+robot:
+
+- `/robinion/joint_commands` (`sensor_msgs/msg/JointState`): processed joint position targets in radians, with joint names.
+- `/robinion/policy_actions` (`std_msgs/msg/Float64MultiArray`): raw policy outputs after the RSL-RL action clip.
+
+```bash
+# Latest checkpoint
+./isaaclab.sh -p scripts/play_ros2.py --checkpoint latest
+
+# Specific checkpoint, paced to the policy step rate
+./isaaclab.sh -p scripts/play_ros2.py \
+    --checkpoint logs/rsl_rl/robinion_velocity/walk-v5/model_9999.pt --real-time
+
+# Inspect the commands from another terminal
+ros2 topic echo /robinion/joint_commands
+```
+
+Wait for the `Publishing ... joint targets ...` line in the playback terminal before starting `ros2 topic echo`; the CLI
+exits when the topic does not exist yet, and Isaac Sim can take a while to start. If the playback shell sets
+`ROS_LOCALHOST_ONLY=1`, export the same value in the echo shell; otherwise FastDDS discovery stays isolated and the
+topics do not appear. After changing ROS environment variables, run `ros2 daemon stop` so `ros2 topic list` rebuilds
+its cached graph.
+
+The script uses the ROS 2 runtime bundled with Isaac Sim when no sourced Python 3.12 ROS 2 environment is available. On
+Ubuntu 22.04 that is the bundled Humble runtime, which interoperates with the system `ros2` CLI. Use
+`--ros-distro system` to require an already sourced ROS 2 environment, or `--no-ros` to run playback without publishers.
+Use `--ros-domain-id` to override `ROS_DOMAIN_ID`; the subscribing shell must use the same value.
+
 ## Project structure
 
 Task families live in `src/robinion_gym/tasks`. Within a manager-based family, task-wide MDP terms live in `mdp`, while

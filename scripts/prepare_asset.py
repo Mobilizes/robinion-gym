@@ -149,8 +149,9 @@ def author_fixups(stage: Usd.Stage) -> None:
     if scene.IsValid():
         prepend_api(scene, "PhysxSceneAPI")
 
-    # Close the parallelogram linkage: the bars are unactuated in the real robot, so keep them out of
-    # the articulation's degree-of-freedom count and let the loop joints hold them on the driven links.
+    # Close the parallelogram linkage: the bars are unactuated in the real robot. The loop joints
+    # are excluded from the articulation's degree-of-freedom count and hold the bars on the driven
+    # links. The robot config keeps the bar revolute drives passive and out of the action space.
     for name, bar_link, driven_link, bar_anchor, driven_anchor in LOOP_JOINTS:
         joint = UsdPhysics.SphericalJoint.Define(stage, physics.GetPath().AppendChild(name))
         joint.CreateBody0Rel().SetTargets([find_prim_by_name(stage, bar_link).GetPath()])
