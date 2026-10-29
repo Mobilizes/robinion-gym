@@ -22,7 +22,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
-from isaaclab_physx.physics import PhysxCfg
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
 from isaaclab_tasks.utils import PresetCfg
 
@@ -39,8 +39,19 @@ from . import mdp
 class RobinionPhysicsCfg(PresetCfg):
     """Physics backend presets for the robinion velocity environment."""
 
-    isaacsim_physx: PhysxCfg = PhysxCfg(bounce_threshold_velocity=0.2)
-    default: PhysxCfg = isaacsim_physx
+    newton_mjwarp: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            njmax=128,
+            nconmax=32,
+            cone="pyramidal",
+            impratio=1.0,
+            integrator="implicitfast",
+        ),
+        num_substeps=1,
+        debug_mode=False,
+    )
+    # BAM actuators only run through the Newton-native path, so Newton is the default backend.
+    default: NewtonCfg = newton_mjwarp
 
 
 ##
@@ -111,10 +122,10 @@ class CommandsCfg:
         # of the level-0 range, otherwise every environment is asked to sprint from the
         # first step and the policy learns an unstable forward lean.
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.2, 0.3), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.2, 0.2)
+            lin_vel_x=(-0.3, 0.3), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.2, 0.2)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.4, 0.6), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.4, 0.4)
+            lin_vel_x=(-0.6, 0.6), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.4, 0.4)
         ),
     )
 
@@ -496,7 +507,7 @@ class TerminationsCfg:
 
     term_timeout = DoneTerm(func=mdp.time_out, time_out=True)
     term_height = DoneTerm(
-        func=mdp.root_height_below_minimum, params={"minimum_height": 0.2}
+        func=mdp.root_height_below_minimum, params={"minimum_height": 0.3}
     )
     term_self_collision = DoneTerm(
         func=mdp.illegal_contact,
@@ -574,6 +585,8 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1 / 400
         self.sim.render_interval = self.decimation
         self.sim.physics = RobinionPhysicsCfg()
+        # Native BAM actuator groups replace the USD drives through Newton's actuator path.
+        self.sim.use_newton_actuators = True
         # tick the contact sensor with the physics step so it samples at 200 Hz
         self.scene.contact_forces.update_period = self.sim.dt
 

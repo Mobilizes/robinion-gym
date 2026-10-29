@@ -36,6 +36,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, SimulationContext
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
 from robinion_gym.robots import ROBINION_CFG
 
@@ -53,8 +54,13 @@ class NewRobotSceneCfg(InteractiveSceneCfg):
 def main():
     """Main function."""
 
-    # Initialize the simulation context
-    sim_cfg = SimulationCfg(dt=0.01, gravity=(0.0, 0.0, -0.05))
+    # Initialize the simulation context. Native BAM actuators require Newton's MJWarp solver.
+    sim_cfg = SimulationCfg(
+        dt=0.01,
+        gravity=(0.0, 0.0, -0.05),
+        use_newton_actuators=True,
+        physics=NewtonCfg(solver_cfg=MJWarpSolverCfg(cone="pyramidal", impratio=1.0, integrator="implicitfast")),
+    )
     sim = SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view([2.5, 0.0, 2.5], [0.0, 0.0, 1.0])

@@ -35,7 +35,6 @@ Python 3.12.
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import importlib.util
 import os
 import platform
@@ -188,11 +187,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg  # noqa: E402
 from isaaclab.utils.assets import retrieve_file_path  # noqa: E402
 
 from isaaclab_rl.entrypoints.common import CHECKPOINT_SELECTORS, resolve_checkpoint_selector  # noqa: E402
-from isaaclab_rl.rsl_rl import (  # noqa: E402
-    RslRlBaseRunnerCfg,
-    RslRlVecEnvWrapper,
-    handle_deprecated_rsl_rl_cfg,
-)
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper  # noqa: E402
 
 from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config, setup_preset_cli  # noqa: E402
 
@@ -447,9 +442,6 @@ def main() -> None:
     )
     env_cfg: ManagerBasedRLEnvCfg
     agent_cfg: RslRlBaseRunnerCfg
-
-    installed_version = importlib.metadata.version("rsl-rl-lib")
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
 
     if args_cli.experiment_name is not None:
         agent_cfg.experiment_name = args_cli.experiment_name

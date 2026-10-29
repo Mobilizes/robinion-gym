@@ -11,8 +11,7 @@ import importlib
 import gymnasium as gym
 from prettytable import PrettyTable
 
-from isaaclab_tasks.utils.preset_cli import enumerate_task_presets
-from isaaclab_tasks.utils.preset_target import PresetTarget
+from isaaclab_tasks.utils.hydra import PresetTarget, enumerate_task_presets
 
 importlib.import_module("robinion_gym.tasks")
 
@@ -25,9 +24,12 @@ def _format_presets(preset_map: dict | None) -> str:
     labels = {
         PresetTarget.PHYSICS: "physics",
         PresetTarget.RENDERER: "renderer",
+        PresetTarget.VISUALIZER: "visualizer",
         PresetTarget.DOMAIN: "domain",
     }
-    lines = [f"{label}: {', '.join(preset_map[target])}" for target, label in labels.items() if preset_map[target]]
+    lines = [
+        f"{label}: {', '.join(preset_map[target])}" for target, label in labels.items() if preset_map.get(target)
+    ]
     return "\n".join(lines) if lines else "(none)"
 
 
@@ -35,7 +37,9 @@ def main() -> None:
     """Print the generated project's registered environments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keyword", default="RobinionGym-", help="Substring used to filter task ids.")
-    parser.add_argument("--show_presets", action="store_true", help="Show physics, renderer, and domain presets.")
+    parser.add_argument(
+        "--show_presets", action="store_true", help="Show physics, renderer, visualizer, and domain presets."
+    )
     args = parser.parse_args()
 
     task_specs = [

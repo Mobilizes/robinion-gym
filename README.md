@@ -9,7 +9,8 @@ The registered tasks are:
 ## Installation
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the project environment. The default
-environment uses the Newton backend and does not install Isaac Sim:
+`uv sync` does not install Isaac Sim. Isaac Lab `main` targets Isaac Sim 6.2 and the CUDA 13 PyTorch stack, which
+requires NVIDIA driver `>=595.58.03` on Linux x86_64:
 
 ```bash
 uv sync
@@ -18,18 +19,19 @@ uv sync
 This project was generated from an Isaac Lab source checkout. Its `pyproject.toml` uses editable relative paths to that
 checkout, so regenerate the project or update `[tool.uv.sources]` if either directory moves.
 
-Optional backends are available through extras. Pass the extra to each `uv run` command that needs it:
+Optional runtimes are available through extras. Pass the extra to each `uv run` command that needs it. The Robinion
+tasks use Newton physics because their native BAM servos cannot run on PhysX:
 
 ```bash
-# Standalone OV PhysX
-uv run --extra ovphysx isaaclab random_agent --task <TASK_NAME> physics=ovphysx
+# OVRTX renderer with Newton physics
+uv run --extra ovrtx isaaclab random_agent --task <TASK_NAME> --viz newton_rtx
 
-# Isaac Sim with PhysX and RTX rendering
-uv run --extra isaacsim isaaclab random_agent --task <TASK_NAME> physics=isaacsim_physx
+# Isaac Sim Kit visualizer with Newton physics
+uv run --extra isaacsim isaaclab random_agent --task <TASK_NAME> --viz kit
 ```
 
-The `ov` extra installs both the `ovphysx` and `ovrtx` runtimes. You can also select `ovrtx` independently when using
-Newton physics with the OVRTX renderer. Commit `pyproject.toml` and `uv.lock` so collaborators use the same environment.
+The `ov` extra installs both the `ovphysx` and `ovrtx` runtimes. Commit `pyproject.toml` and `uv.lock` so collaborators
+use the same environment.
 
 ## Run the generated tasks
 
@@ -141,7 +143,7 @@ uv run isaaclab --editor --isaac_path <isaac-sim-path>
 
 ## Troubleshooting
 
-### Isaac Sim / PhysX backend fails with a `pxr` (OpenUSD) error
+### Isaac Sim / Kit startup fails with a `pxr` (OpenUSD) error
 
 Running the `isaacsim` backend directly can fail during Kit startup with:
 
@@ -151,16 +153,16 @@ RuntimeError: extension class wrapper for base class pxrInternal_v0_25_11__pxrRe
 TypeError: No to_python (by-value) converter found for C++ type: std::vector<pxrInternal_v0_25_11__pxrReserved__::SdfPath, ...>
 ```
 
-This is an upstream version conflict: `isaacsim 6.1.0.0` bundles OpenUSD 25.11, while the pinned `usd-exchange 2.3.0`
-vendors OpenUSD 25.05. Both provide a namespace `pxr` package, so Python merges them and loads a mix of the two USD
-runtimes. Use the `isaaclab.sh` wrapper, which puts Isaac Sim's bundled `pxr` ahead of the standalone one:
+Isaac Sim and the pinned `usd-exchange` package can both ship a namespace `pxr` package, so Python may merge them and
+load a mix of two OpenUSD runtimes. Use the `isaaclab.sh` wrapper, which puts Isaac Sim's bundled `pxr` ahead of the
+standalone one:
 
 ```bash
-./isaaclab.sh random_agent --task RobinionGym-Velocity-Robinion --physics=isaacsim_physx
+./isaaclab.sh random_agent --task RobinionGym-Velocity-Robinion --viz kit
 ```
 
-The wrapper is a local workaround for this repository's environment. Remove it once Isaac Lab pins a USD provider that
-matches Isaac Sim's bundled OpenUSD version.
+The wrapper is a local workaround for this repository's environment. Remove it once the pinned USD provider matches
+Isaac Sim's bundled OpenUSD version.
 
 ### Editor cannot resolve modules
 

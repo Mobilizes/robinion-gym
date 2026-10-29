@@ -43,7 +43,11 @@ class UniformLevelVelocityCommand(UniformVelocityCommand):
         self._num_good_steps += (err < self.cfg.good_err_threshold).float()
         self._num_steps += 1.0
 
-    def _resample_command(self, env_ids: Sequence[int]):
+    def _resample_command(self, env_ids: Sequence[int] | slice):
+        num_envs = len(range(self.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
+        if num_envs == 0:
+            return
+
         # update the level based on the previous command period
         num_steps = self._num_steps[env_ids]
         good_ratio = self._num_good_steps[env_ids] / num_steps.clamp(min=1.0)
@@ -68,15 +72,15 @@ class UniformLevelVelocityCommand(UniformVelocityCommand):
 
         lo = torch.stack([lin_x[:, 0], lin_y[:, 0], ang_z[:, 0]], dim=-1)
         hi = torch.stack([lin_x[:, 1], lin_y[:, 1], ang_z[:, 1]], dim=-1)
-        self.vel_command_b[env_ids] = lo + torch.rand(len(env_ids), 3, device=self.device) * (hi - lo)
+        self.vel_command_b[env_ids] = lo + torch.rand(num_envs, 3, device=self.device) * (hi - lo)
 
         # heading target (if enabled)
         if self.cfg.heading_command:
-            r = torch.rand(len(env_ids), device=self.device)
+            r = torch.rand(num_envs, device=self.device)
             self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
             self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
         # standing envs
-        self.is_standing_env[env_ids] = torch.rand(len(env_ids), device=self.device) <= self.cfg.rel_standing_envs
+        self.is_standing_env[env_ids] = torch.rand(num_envs, device=self.device) <= self.cfg.rel_standing_envs
 
     def reset(self, env_ids: Sequence[int] | None = None):
         if env_ids is None:

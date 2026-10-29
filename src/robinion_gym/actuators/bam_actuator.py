@@ -11,7 +11,7 @@ import torch
 from bam.actuator import TorchBackend
 from bam.model import Model, load_model
 
-from isaaclab.actuators import ActuatorBase
+from isaaclab.actuators import ActuatorBase, resolve_joint_parameter
 from isaaclab.sim import SimulationContext
 from isaaclab.utils.types import ArticulationActions
 
@@ -35,7 +35,9 @@ class BAMActuator(ActuatorBase):
     load-dependent BAM friction is required.
 
     All joints in the group share one BAM model, so they must use the same servo
-    type. Use one actuator group per BAM parameter file.
+    type. Use one actuator group per BAM parameter file. Joints driven by several
+    servos in parallel set :attr:`BAMActuatorCfg.num_servos`; their motor torque is
+    multiplied accordingly.
     """
 
     cfg: BAMActuatorCfg
@@ -79,6 +81,9 @@ class BAMActuator(ActuatorBase):
             sim = SimulationContext.instance()
             self._dt = sim.get_physics_dt() if sim is not None else 1.0 / 60.0
 
+        self._num_servos = resolve_joint_parameter(self.cfg.num_servos, 1.0, joint_names, num_envs, device)
+        """Number of servos driving each joint in parallel, shape (num_envs, num_joints)."""
+
         self._control = torch.zeros_like(self.computed_effort)
         """Last control signal sent to the motor [V or A, depending on the BAM actuator]."""
 
@@ -106,7 +111,9 @@ class BAMActuator(ActuatorBase):
         else:
             self._control.copy_(control)
 
-        self.computed_effort = self.model.actuator.compute_torque(control, self.cfg.torque_enable, joint_pos, joint_vel)
+        motor_effort = self.model.actuator.compute_torque(control, self.cfg.torque_enable, joint_pos, joint_vel)
+        # Parallel servos see the same command and speed, so their torques add up.
+        self.computed_effort = motor_effort * self._num_servos
         self.applied_effort = self._clip_effort(self.computed_effort)
 
         control_action.joint_efforts = self.applied_effort
