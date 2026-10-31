@@ -88,6 +88,16 @@ def _parallel_servo_motor(motor: BamMotorCfg, count: int) -> BamMotorCfg:
 _XH540_M6_DUAL_MOTOR = _parallel_servo_motor(_XH540_M6_MOTOR, 2)
 """Two XH540-W270 servos driving one joint (front thighs and knees)."""
 
+#: Per-environment command latency and supply-voltage spread used for actuator domain randomization.
+#: The identified command delay is 2.55 ms (about one 400 Hz step); 1-3 steps covers the servo and
+#: bus jitter seen on hardware. The lag is held for 100 physics steps (0.25 s) with a 50% resample
+#: chance, so it changes on the timescale of a gait rather than every physics step.
+_BAM_MIN_DELAY = 1
+_BAM_MAX_DELAY = 3
+_BAM_DELAY_HOLD_PROB = 0.5
+_BAM_DELAY_UPDATE_PERIOD = 100
+_BAM_VIN_RANGE = (14.0, 15.5)
+
 ##
 # Servo peak torque
 ##
@@ -233,8 +243,11 @@ ROBINION_CFG = ArticulationCfg(
             motor=_XH540_M6_MOTOR,
             kp_fw=800.0,
             vin=14.8,
-            min_delay=1,
-            max_delay=1,
+            vin_range=_BAM_VIN_RANGE,
+            min_delay=_BAM_MIN_DELAY,
+            max_delay=_BAM_MAX_DELAY,
+            delay_hold_prob=_BAM_DELAY_HOLD_PROB,
+            delay_update_period=_BAM_DELAY_UPDATE_PERIOD,
             actuator_effort_limit=_LEG_SINGLE_PEAK_TORQUE,
             joint_effort_limit=_LEG_SINGLE_PEAK_TORQUE,
             armature=_LEG_SINGLE_ARMATURE,
@@ -244,8 +257,11 @@ ROBINION_CFG = ArticulationCfg(
             motor=_XH540_M6_DUAL_MOTOR,
             kp_fw=800.0,
             vin=14.8,
-            min_delay=1,
-            max_delay=1,
+            vin_range=_BAM_VIN_RANGE,
+            min_delay=_BAM_MIN_DELAY,
+            max_delay=_BAM_MAX_DELAY,
+            delay_hold_prob=_BAM_DELAY_HOLD_PROB,
+            delay_update_period=_BAM_DELAY_UPDATE_PERIOD,
             actuator_effort_limit=_LEG_DUAL_PEAK_TORQUE,
             joint_effort_limit=_LEG_DUAL_PEAK_TORQUE,
             armature=_LEG_DUAL_ARMATURE,
@@ -273,8 +289,11 @@ ROBINION_CFG = ArticulationCfg(
             motor=_XH540_M6_MOTOR,
             kp_fw=800.0,
             vin=14.8,
-            min_delay=1,
-            max_delay=1,
+            vin_range=_BAM_VIN_RANGE,
+            min_delay=_BAM_MIN_DELAY,
+            max_delay=_BAM_MAX_DELAY,
+            delay_hold_prob=_BAM_DELAY_HOLD_PROB,
+            delay_update_period=_BAM_DELAY_UPDATE_PERIOD,
             actuator_effort_limit=_TORSO_ARM_PEAK_TORQUE,
             joint_effort_limit=_TORSO_ARM_PEAK_TORQUE,
             armature=_TORSO_ARM_ARMATURE,
@@ -284,8 +303,11 @@ ROBINION_CFG = ArticulationCfg(
             motor=_XH540_M6_MOTOR,
             kp_fw=800.0,
             vin=14.8,
-            min_delay=1,
-            max_delay=1,
+            vin_range=_BAM_VIN_RANGE,
+            min_delay=_BAM_MIN_DELAY,
+            max_delay=_BAM_MAX_DELAY,
+            delay_hold_prob=_BAM_DELAY_HOLD_PROB,
+            delay_update_period=_BAM_DELAY_UPDATE_PERIOD,
             actuator_effort_limit=_HEAD_PEAK_TORQUE,
             joint_effort_limit=_HEAD_PEAK_TORQUE,
             armature=_HEAD_ARMATURE,

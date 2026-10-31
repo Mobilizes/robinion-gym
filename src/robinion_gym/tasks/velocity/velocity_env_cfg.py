@@ -20,6 +20,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
@@ -63,10 +64,20 @@ class RobinionPhysicsCfg(PresetCfg):
 class RobinionVelocitySceneCfg(InteractiveSceneCfg):
     """Configuration for the robinion velocity scene."""
 
-    # ground plane
+    # Ground plane. MuJoCo combines two contact friction coefficients with max(), so the ground
+    # sits at the lower bound of the trained range and the foot shapes (randomized per environment)
+    # set the effective friction. Keeping the ground fixed also avoids a shared, non-per-env
+    # material on a single plane.
     ground = AssetBaseCfg(
         prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
+        spawn=sim_utils.GroundPlaneCfg(
+            size=(100.0, 100.0),
+            physics_material=RigidBodyMaterialBaseCfg(
+                static_friction=0.3,
+                dynamic_friction=0.3,
+                restitution=0.0,
+            ),
+        ),
     )
 
     # robot
@@ -117,15 +128,11 @@ class CommandsCfg:
         rel_heading_envs=1.0,
         heading_command=False,
         debug_vis=True,
-        # Level 0 is the comfortable range every environment starts in; the level
-        # curriculum ramps toward limit_ranges as tracking improves. Keep the fast end out
-        # of the level-0 range, otherwise every environment is asked to sprint from the
-        # first step and the policy learns an unstable forward lean.
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.3, 0.3), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.2, 0.2)
+            lin_vel_x=(-0.6, 0.8), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.3, 0.3)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.6, 0.6), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.4, 0.4)
+            lin_vel_x=(-0.6, 0.8), lin_vel_y=(-0.2, 0.2), ang_vel_z=(-0.6, 0.6)
         ),
     )
 
@@ -235,6 +242,58 @@ class EventCfg:
         params={
             "position_range": (1.0, 1.0),
             "velocity_range": (0.0, 0.0),
+        },
+    )
+
+    # Foot contact randomization. The ground plane is fixed at 0.3, so the sampled foot friction
+    # is the effective foot-ground friction. Torsional/rolling friction model sole spin and roll,
+    # and the stiffness/damping pair randomizes the MuJoCo contact solref.
+    foot_contact = EventTerm(
+        func=mdp.randomize_foot_contact,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
+            "friction_range": (0.3, 1.2),
+            "torsional_friction_range": (0.0, 0.1),
+            "rolling_friction_range": (0.0, 0.1),
+            "solref_time_constant_range": (0.01, 0.04),
+            "solref_damping_ratio_range": (0.7, 1.3),
+        },
+    )
+
+    # Mass and inertia are sampled independently so the policy sees both payload and inertia
+    # mismatches. Mass stays within +-15%, inertia within +-20%.
+    randomize_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "mass_distribution_params": (0.85, 1.15),
+            "operation": "scale",
+            "recompute_inertia": False,
+        },
+    )
+    randomize_inertia = EventTerm(
+        func=mdp.randomize_rigid_body_inertia,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "inertia_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+            "diagonal_only": True,
+        },
+    )
+
+    # BAM strength/gain/friction randomization. Command latency and supply-voltage spread are
+    # configured on the actuator groups in the robot asset (shared drive settings).
+    randomize_actuator = EventTerm(
+        func=mdp.randomize_bam_actuator,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "kp_scale_range": (0.8, 1.2),
+            "max_effort_scale_range": (0.85, 1.15),
+            "friction_scale_range": (0.85, 1.15),
         },
     )
 
@@ -464,9 +523,11 @@ class RewardsCfg:
     # pen_termination = RewTerm(func=mdp.is_terminated, weight=-50.0)
     pen_flat_orientation = RewTerm(func=mdp.base_rp_l1, weight=-10.0)
 
+    # Contact-rich randomization makes sliding and twisted foot placement much cheaper to exploit,
+    # so these shaping terms are weighted above the original -1.0.
     pen_feet_slide = RewTerm(
         func=mdp.feet_slide,
-        weight=-1.0,
+        weight=-3.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
@@ -474,12 +535,12 @@ class RewardsCfg:
     )
     pen_feet_yaw_diff = RewTerm(
         func=mdp.feet_yaw_diff,
-        weight=-1.0,
+        weight=-2.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
     )
     pen_feet_yaw_mean = RewTerm(
         func=mdp.feet_yaw_mean,
-        weight=-1.0,
+        weight=-2.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
     )
     pen_feet_distance = RewTerm(

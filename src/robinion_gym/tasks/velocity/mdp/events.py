@@ -8,7 +8,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import warp as wp
+from newton import ModelFlags
 
+from isaaclab.actuators import BamActuatorCfg
+from isaaclab.actuators.newton import read_group_parameter, write_group_parameter
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import RED_ARROW_X_MARKER_CFG
@@ -25,7 +29,7 @@ if TYPE_CHECKING:
 def reset_non_finite_envs(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg | None = None,
     max_joint_vel: float = 50.0,
     max_root_lin_vel: float = 20.0,
     max_root_ang_vel: float = 50.0,
@@ -59,6 +63,8 @@ def reset_non_finite_envs(
         max_root_ang_vel: Maximum plausible root angular velocity [rad/s]. Defaults to ``50.0``.
         max_action: Maximum plausible absolute action value. Defaults to ``10.0``.
     """
+    if asset_cfg is None:
+        asset_cfg = SceneEntityCfg("robot")
     asset = env.scene[asset_cfg.name]
     # check current state for non-finite or implausible values
     joint_pos = asset.data.joint_pos.torch[env_ids]
@@ -98,7 +104,7 @@ def reset_non_finite_envs(
 def override_joint_pos_limits(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg | None = None,
     limit: float = 0.5,
 ) -> None:
     """Override the joint position limits to a symmetric band around each joint's default position.
@@ -112,6 +118,8 @@ def override_joint_pos_limits(
         asset_cfg: The asset configuration for the joints whose limits should be overridden.
         limit: The half-width (in rad) of the band around each joint's default position.
     """
+    if asset_cfg is None:
+        asset_cfg = SceneEntityCfg("robot")
     asset = env.scene[asset_cfg.name]
     # resolve indices
     if isinstance(env_ids, slice):
@@ -134,6 +142,178 @@ def override_joint_pos_limits(
     new_limits = torch.stack([new_low, new_high], dim=-1)
     # write into the physics simulation
     asset.write_joint_position_limit_to_sim_index(limits=new_limits, joint_ids=joint_ids, env_ids=env_ids)
+
+
+class randomize_foot_contact(ManagerTermBase):
+    """Randomize the foot contact model per environment on Newton's MJWarp solver.
+
+    Sliding friction is the maximum of the two contacting shapes' coefficients in MuJoCo, so the
+    ground plane is authored at the lower bound and the feet are sampled over the full effective
+    range. Torsional (spin) and rolling friction are sampled on the feet as well; the ground's much
+    smaller defaults leave the sampled foot values in control. The MuJoCo contact reference is
+    randomized through the foot contact stiffness and damping: ``(time_constant, damping_ratio)``
+    is sampled and converted with ``kd = 2 / time_constant`` and
+    ``ke = (kd / (2 * damping_ratio)) ** 2``. The effective solref is the solmix-weighted average of
+    the foot and ground values, so the sampled foot range is wider than the effective range.
+
+    Args:
+        env: The environment instance.
+        env_ids: Environment indices to randomize. ``None`` or a full slice randomizes every environment.
+        asset_cfg: The articulation and foot bodies whose collision shapes are randomized.
+        friction_range: Effective sliding-friction range.
+        torsional_friction_range: Torsional (spin) friction range.
+        rolling_friction_range: Rolling friction range.
+        solref_time_constant_range: Foot contact time-constant range [s].
+        solref_damping_ratio_range: Foot contact damping-ratio range [-].
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        self.asset: Articulation = env.scene[asset_cfg.name]
+        self.asset_cfg = asset_cfg
+        self._newton_manager = env.sim.backend_manager
+        model = self._newton_manager.backend.model
+        if model is None:
+            raise RuntimeError("randomize_foot_contact requires Newton's MJWarp backend")
+
+        root_view = self.asset._root_view
+        self._mu = wp.to_torch(root_view.get_attribute("shape_material_mu", model)[:, 0])
+        self._mu_torsional = wp.to_torch(root_view.get_attribute("shape_material_mu_torsional", model)[:, 0])
+        self._mu_rolling = wp.to_torch(root_view.get_attribute("shape_material_mu_rolling", model)[:, 0])
+        self._ke = wp.to_torch(root_view.get_attribute("shape_material_ke", model)[:, 0])
+        self._kd = wp.to_torch(root_view.get_attribute("shape_material_kd", model)[:, 0])
+
+        if asset_cfg.body_ids != slice(None):
+            # The view's shape axis is not grouped by body, so select each backend body's own
+            # shape indices (the same mapping the standard material event uses).
+            body_shapes = root_view.body_shapes
+            backend_body_ids = self.asset.map_body_ids_to_backend(asset_cfg.body_ids)
+            shape_indices = [shape_id for body_id in backend_body_ids for shape_id in body_shapes[body_id]]
+            self._shape_indices = torch.tensor(shape_indices, dtype=torch.long)
+        else:
+            self._shape_indices = torch.arange(self._mu.shape[1], dtype=torch.long)
+
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids: torch.Tensor | slice | None,
+        asset_cfg: SceneEntityCfg,
+        friction_range: tuple[float, float],
+        torsional_friction_range: tuple[float, float],
+        rolling_friction_range: tuple[float, float],
+        solref_time_constant_range: tuple[float, float],
+        solref_damping_ratio_range: tuple[float, float],
+    ) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        num_envs = len(range(env.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
+        if num_envs == 0:
+            return
+
+        device = env.device
+        env_rows = env_ids if isinstance(env_ids, slice) else env_ids[:, None]
+        shape_idx = self._shape_indices.to(device)
+        num_shapes = len(shape_idx)
+
+        def sample(value_range: tuple[float, float]) -> torch.Tensor:
+            return torch.empty((num_envs, num_shapes), device=device).uniform_(*value_range)
+
+        self._mu[env_rows, shape_idx] = sample(friction_range)
+        self._mu_torsional[env_rows, shape_idx] = sample(torsional_friction_range)
+        self._mu_rolling[env_rows, shape_idx] = sample(rolling_friction_range)
+
+        time_constant = sample(solref_time_constant_range)
+        damping_ratio = sample(solref_damping_ratio_range)
+        stiffness_damping = 2.0 / time_constant
+        self._kd[env_rows, shape_idx] = stiffness_damping
+        self._ke[env_rows, shape_idx] = torch.square(stiffness_damping / (2.0 * damping_ratio))
+
+        self._newton_manager.add_model_change(ModelFlags.SHAPE_PROPERTIES)
+
+
+class randomize_bam_actuator(ManagerTermBase):
+    """Randomize BAM servo strength, firmware gain, and gearbox friction per environment.
+
+    The nominal values are captured once at term construction, so repeated resets sample around the
+    identified servo model instead of accumulating previous randomizations. Command latency and
+    supply voltage are configured on :class:`~isaaclab.actuators.BamActuatorCfg` (they are shared
+    drive settings), while the per-DOF ``kp_scale``, ``max_effort``, and ``friction_scale`` arrays
+    are written here.
+
+    Args:
+        env: The environment instance.
+        env_ids: Environment indices to randomize.
+        asset_cfg: The articulation whose BAM actuator groups are randomized.
+        kp_scale_range: Firmware position-gain multiplier range.
+        max_effort_scale_range: Torque-limit multiplier range.
+        friction_scale_range: Gearbox friction-budget multiplier range. ``None`` leaves it unchanged.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        self.asset: Articulation = env.scene[asset_cfg.name]
+        self._groups: list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        for name, actuator_cfg in self.asset.cfg.actuators.items():
+            if not isinstance(actuator_cfg, BamActuatorCfg):
+                continue
+            self._groups.append(
+                (
+                    name,
+                    read_group_parameter(self.asset.actuators, name, "drive", "kp_scale").clone(),
+                    read_group_parameter(self.asset.actuators, name, "drive", "max_effort").clone(),
+                    read_group_parameter(self.asset.actuators, name, "drive", "friction_scale").clone(),
+                )
+            )
+
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids: torch.Tensor | slice | None,
+        asset_cfg: SceneEntityCfg,
+        kp_scale_range: tuple[float, float],
+        max_effort_scale_range: tuple[float, float],
+        friction_scale_range: tuple[float, float] | None = None,
+    ) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        num_envs = len(range(env.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
+        if num_envs == 0:
+            return
+
+        device = env.device
+        for name, kp_nominal, effort_nominal, friction_nominal in self._groups:
+            num_joints = kp_nominal.shape[1]
+
+            def scale(value_range: tuple[float, float], columns: int) -> torch.Tensor:
+                return torch.empty((num_envs, columns), device=device).uniform_(*value_range)
+
+            write_group_parameter(
+                self.asset.actuators,
+                name,
+                "drive",
+                "kp_scale",
+                values=kp_nominal[env_ids] * scale(kp_scale_range, num_joints),
+                env_ids=env_ids,
+            )
+            write_group_parameter(
+                self.asset.actuators,
+                name,
+                "drive",
+                "max_effort",
+                values=effort_nominal[env_ids] * scale(max_effort_scale_range, num_joints),
+                env_ids=env_ids,
+            )
+            if friction_scale_range is not None:
+                write_group_parameter(
+                    self.asset.actuators,
+                    name,
+                    "drive",
+                    "friction_scale",
+                    values=friction_nominal[env_ids] * scale(friction_scale_range, num_joints),
+                    env_ids=env_ids,
+                )
 
 
 class push_robot_by_force(ManagerTermBase):

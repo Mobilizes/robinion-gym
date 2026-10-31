@@ -90,6 +90,51 @@ Ubuntu 22.04 that is the bundled Humble runtime, which interoperates with the sy
 `--ros-distro system` to require an already sourced ROS 2 environment, or `--no-ros` to run playback without publishers.
 Use `--ros-domain-id` to override `ROS_DOMAIN_ID`; the subscribing shell must use the same value.
 
+### Drive one robot with a keyboard or gamepad
+
+`scripts/play_control.py` runs a trained policy in exactly one environment and feeds the velocity command from live
+input instead of the random command generator. Command changes are smoothed, and the gamepad sticks keep their analog
+strength, so a partial stick deflection asks for a proportionally smaller velocity.
+
+```bash
+# Latest checkpoint; the script opens the Kit window because input needs it
+./isaaclab.sh -p scripts/play_control.py --checkpoint latest
+
+# Keyboard only, with a stronger push and no strafing
+./isaaclab.sh -p scripts/play_control.py --checkpoint latest \
+    --input keyboard --max_lin_vel_y 0.0 --push_force 80
+
+# Use a gamepad only; fail fast when none is connected
+./isaaclab.sh -p scripts/play_control.py --checkpoint latest --input gamepad
+```
+
+Controls:
+
+| Input | Action |
+| --- | --- |
+| `W` / `S` | forward / backward velocity |
+| `A` / `D` | turn left / right |
+| `Q` / `E` | strafe left / right |
+| `F` | shove the robot |
+| `R` | reset the robot |
+| left stick | forward/back and strafe with analog strength |
+| right stick X | turn with analog strength |
+| gamepad `A` | shove the robot |
+| gamepad `X` | reset the robot |
+
+The manual shove applies a horizontal force to every body, proportionally to its mass, for `--push-duration` seconds.
+The net force defaults to `2.5 * mass` N, and the direction is selected with
+`--push-direction {forward,backward,left,right,random}` relative to the robot heading when the push is triggered. Use
+`--push-body` with a body-name regex to push only part of the robot, `--push-cooldown` to change the retrigger delay, and
+`--no-push-vis` to hide the red force arrow. The trained task's automatic push events are disabled in this script, so the
+robot is shoved only when you ask for it.
+
+`--max-lin-vel-x`, `--max-lin-vel-y`, and `--max-ang-vel-z` default to the command ranges the policy was trained on. The
+script also sets `--episode-length-s` to effectively infinity by default, so only a fall or `R` resets the robot. Pass a
+smaller value to restore periodic time-out resets. The viewport follows the robot from a close third-person view by
+default; pass `--no-follow-camera` to free-orbit. Keyboard and gamepad both work at the same time; focus the Kit window
+for input to reach the simulation.
+
 ## Project structure
 
 Task families live in `src/robinion_gym/tasks`. Within a manager-based family, task-wide MDP terms live in `mdp`, while

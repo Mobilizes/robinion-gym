@@ -12,8 +12,9 @@ of truth for the mechanics. The asset is generated in three steps:
    ``urdf/robinion2.urdf`` into the layered asset ``assets/robonionv2/robinion.usda`` with its
    generated payload under ``assets/robonionv2/Payload``.
 2. The handful of things the URDF cannot express are authored on the asset interface layer: the
-   PhysX articulation root, self-collision filtering, and the four parallelogram loops that tie the
-   back thigh/shin bars to the knee/ankle links.
+   PhysX articulation root, self-collision filtering, the four parallelogram loops that tie the
+   back thigh/shin bars to the knee/ankle links, and the flat box foot sole that replaces the
+   narrow convex-hull contact of the imported foot mesh.
 3. The composed asset is flattened into the single file the articulation spawner reads.
 
 The importer ships with Isaac Sim, so the project environment needs the ``isaacsim`` extra; no Isaac Sim
@@ -31,7 +32,7 @@ import os
 import pathlib
 
 import usdex.core
-from pxr import Gf, Sdf, Usd, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from urdf_usd_converter import Converter
 
 PROJECT_DIR = pathlib.Path(__file__).resolve().parents[1]
@@ -45,6 +46,17 @@ PHYSX_ARTICULATION_API = "PhysxArticulationAPI"
 
 #: Self-collision is filtered through one group that contains every collision shape of the robot.
 SELF_COLLISION_GROUP = "RobinionSelfCollisionGroup"
+
+#: Foot collision shape. The URDF/imported foot collision mesh is a convex hull of a thin, rounded
+#: sole, so it touches the ground on a narrow strip. A flat box under the same link approximates the
+#: rubber pad on the real robot and gives a stable support polygon.
+FOOT_LINK_NAMES = ("right_foot_roll_link", "left_foot_roll_link")
+FOOT_COLLISION_MESH_NAME = "foot_visual_1"
+FOOT_SOLE_NAME = "foot_sole_collision"
+FOOT_SOLE_COVERAGE = 0.9
+"""Fraction of the foot mesh's footprint covered by the flat sole box."""
+FOOT_SOLE_THICKNESS = 0.006
+"""Sole box thickness [m]."""
 
 #: The parallelogram bars are plain revolute joints in the URDF, so the linkage is an open chain and
 #: the bars only follow the driven links because the environment actuates them together. Closing the
@@ -100,8 +112,14 @@ def prepend_api(prim: Usd.Prim, api_schema: str) -> None:
     ``Usd.Prim.ApplyAPI`` requires the API's plugin to be registered, which is not the case for the
     PhysX schemas outside Isaac Sim; authoring the same ``prepend`` list op gives the same result.
     """
+    existing = prim.GetMetadata("apiSchemas") or Sdf.TokenListOp()
     list_op = Sdf.TokenListOp()
-    list_op.prependedItems = [api_schema]
+    if existing.explicitItems:
+        # An explicit list replaces prepended/appended items, so merge into it directly.
+        list_op.explicitItems = [api_schema, *existing.explicitItems]
+    else:
+        list_op.prependedItems = [api_schema, *(existing.prependedItems or [])]
+        list_op.appendedItems = existing.appendedItems
     prim.SetMetadata("apiSchemas", list_op)
 
 
@@ -113,7 +131,70 @@ def find_prim_by_name(stage: Usd.Stage, name: str) -> Usd.Prim:
     return prims[0]
 
 
-def author_fixups(stage: Usd.Stage) -> None:
+def _mesh_bbox_in_link_frame(mesh_prim: Usd.Prim) -> tuple[Gf.Vec3d, Gf.Vec3d]:
+    """Return the local-space bounding box of a mesh after its own transform."""
+    mesh = UsdGeom.Mesh(mesh_prim)
+    points = mesh.GetPointsAttr().Get()
+    if not points:
+        raise RuntimeError(f"mesh '{mesh_prim.GetPath()}' has no points")
+    transform = UsdGeom.Xformable(mesh_prim).GetLocalTransformation()
+    transformed = [transform.Transform(Gf.Vec3d(point)) for point in points]
+    lower = Gf.Vec3d(
+        min(point[0] for point in transformed),
+        min(point[1] for point in transformed),
+        min(point[2] for point in transformed),
+    )
+    upper = Gf.Vec3d(
+        max(point[0] for point in transformed),
+        max(point[1] for point in transformed),
+        max(point[2] for point in transformed),
+    )
+    return lower, upper
+
+
+def author_foot_sole(stage: Usd.Stage, foot_link: Usd.Prim) -> None:
+    """Replace the foot's convex-hull mesh contact with a flat box sole.
+
+    The box covers most of the foot footprint and sits at the lowest point of the imported mesh, so
+    it reproduces the flat rubber pad of the real foot instead of the narrow strip a convex hull of
+    the rounded sole produces.
+    """
+    collision_mesh = None
+    for child in foot_link.GetChildren():
+        if child.GetName().endswith(FOOT_COLLISION_MESH_NAME):
+            collision_mesh = child
+            break
+    if collision_mesh is None:
+        raise RuntimeError(f"no '{FOOT_COLLISION_MESH_NAME}' mesh under '{foot_link.GetPath()}'")
+
+    lower, upper = _mesh_bbox_in_link_frame(collision_mesh)
+    length = FOOT_SOLE_COVERAGE * (upper[0] - lower[0])
+    width = FOOT_SOLE_COVERAGE * (upper[1] - lower[1])
+    center = Gf.Vec3d(
+        0.5 * (lower[0] + upper[0]),
+        0.5 * (lower[1] + upper[1]),
+        lower[2] + 0.5 * FOOT_SOLE_THICKNESS,
+    )
+
+    sole = UsdGeom.Cube.Define(stage, foot_link.GetPath().AppendChild(FOOT_SOLE_NAME))
+    sole.CreateSizeAttr().Set(1.0)
+    sole_xform = UsdGeom.Xformable(sole)
+    sole_xform.AddTranslateOp().Set(center)
+    sole_xform.AddScaleOp().Set(Gf.Vec3f(length, width, FOOT_SOLE_THICKNESS))
+    UsdGeom.Imageable(sole).CreatePurposeAttr().Set(UsdGeom.Tokens.guide)
+
+    sole_prim = sole.GetPrim()
+    UsdPhysics.CollisionAPI.Apply(sole_prim)
+    UsdPhysics.CollisionAPI(sole_prim).CreateCollisionEnabledAttr().Set(True)
+    # Apply after the USD schema so ``UsdPhysics.CollisionAPI.Apply`` cannot replace the list op.
+    prepend_api(sole_prim, "NewtonCollisionAPI")
+
+    # Keep the mesh for rendering, but take it out of collision so only the flat box contacts.
+    UsdPhysics.CollisionAPI.Apply(collision_mesh)
+    UsdPhysics.CollisionAPI(collision_mesh).CreateCollisionEnabledAttr().Set(False)
+
+
+def author_fixups(stage: Usd.Stage, foot_collision: str = "box") -> None:
     """Author everything the URDF cannot express on the asset interface layer."""
     root = stage.GetDefaultPrim()
     geometry = root.GetChild("Geometry")
@@ -132,6 +213,12 @@ def author_fixups(stage: Usd.Stage) -> None:
         False
     )
     stage.GetPrimAtPath(physics.GetPath().AppendChild("base_to_lower_body_fixed_joint")).SetActive(False)
+
+    # The imported foot collision is a convex hull of a rounded sole and only contacts on a narrow
+    # strip. Replace it with a flat box sole for hardware-like support, or keep the mesh when asked.
+    if foot_collision == "box":
+        for foot_link_name in FOOT_LINK_NAMES:
+            author_foot_sole(stage, find_prim_by_name(stage, foot_link_name))
 
     # Self-collision is enabled by the spawner, so filter it down to the pairs the URDF resolves: one
     # group holding every collision shape, with the group filtered against itself.
@@ -205,6 +292,12 @@ def main() -> None:
         help="path to the robinion_description checkout (default: %(default)s)",
     )
     parser.add_argument("--assets-dir", type=pathlib.Path, default=PROJECT_DIR / "assets", help="output directory")
+    parser.add_argument(
+        "--foot-collision",
+        choices=("box", "mesh"),
+        default="box",
+        help="foot collision shape: flat box sole (default) or the imported mesh convex hull",
+    )
     args = parser.parse_args()
 
     urdf_path = args.description_dir / "urdf" / "robinion2.urdf"
@@ -216,7 +309,7 @@ def main() -> None:
     print(f"[INFO]: converted {urdf_path} into {interface_path}")
 
     stage = Usd.Stage.Open(str(interface_path))
-    author_fixups(stage)
+    author_fixups(stage, foot_collision=args.foot_collision)
     stage.Save()
 
     flattened_path = args.assets_dir / f"{ASSET_STEM}.usd"

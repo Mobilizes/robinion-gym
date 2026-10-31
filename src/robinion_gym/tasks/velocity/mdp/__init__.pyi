@@ -12,6 +12,8 @@ __all__ = [
     # custom events
     "reset_non_finite_envs",
     "override_joint_pos_limits",
+    "randomize_foot_contact",
+    "randomize_bam_actuator",
     "push_robot_by_force",
     # custom curriculums
     "push_velocity_range_ramp",
@@ -40,7 +42,13 @@ from isaaclab_tasks.core.velocity.mdp.rewards import *  # noqa: F401, F403
 
 from .commands import UniformLevelVelocityCommand, UniformLevelVelocityCommandCfg
 from .curriculums import push_velocity_range_ramp
-from .events import override_joint_pos_limits, push_robot_by_force, reset_non_finite_envs
+from .events import (
+    override_joint_pos_limits,
+    push_robot_by_force,
+    randomize_bam_actuator,
+    randomize_foot_contact,
+    reset_non_finite_envs,
+)
 from .observations import gait_phase
 from .rewards import (
     arm_swing_gait,
