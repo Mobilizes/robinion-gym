@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
+from pathlib import Path
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import BamActuatorCfg, BamMotorCfg, ImplicitActuatorCfg
@@ -14,45 +16,75 @@ HUMANOID_ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".
 ##
 # Actuator model
 ##
-# The robot uses Isaac Lab's Newton-native BAM servo model. The motor fit below is the
-# XH540-W270 ``m6`` identification from the sibling ``move_actuator/bam-xseries`` checkout
-# (``params/xh540/m6.json``). It is the only X-series model identified so far, so it currently
-# drives every joint, including the XM540-W270 and XM430-W350 joints. Split the groups by servo
-# type (and give each group its own ``BamMotorCfg``) once those parameter files are identified.
+# The robot uses Isaac Lab's Newton-native BAM servo model with the identified fits in the sibling
+# ``move_actuator/bam-xseries`` checkout. The legs and torso use ``params/xh540/m6.json``; the arms
+# and head use ``params/xm430/m6.json``. No XM540-W270 fit exists yet, so the XM540-W270 joints
+# reuse the XH540 fit of the same frame size; split them when that fit is identified.
 #
 # BAM computes the firmware position loop, motor torque, and gearbox friction internally, so
 # stiffness and damping are not configured here. The armature (reflected rotor inertia) is still
-# a solver property and is set below, doubled for joints driven by two servos in parallel.
+# a solver property and is set below from each fit, doubled for joints driven by two servos in
+# parallel.
 #
-# The fit's ``q_offset`` is a bench calibration offset and is not part of the servo model. Its
-# ``command_delay`` (2.55 ms) is one physics step at the task's 400 Hz rate, so it maps to a
-# one-step command lag. The fit does not identify a firmware current limit, so ``max_current`` is
-# zero, which disables the limiter as in BAM's bench model.
+# The fits' ``q_offset`` is a bench calibration offset and is not part of the servo model. Their
+# ``command_delay`` (1.3-1.5 ms) is below one physics step at the task's 400 Hz rate, so the drive
+# uses a one-step minimum lag plus the jitter configured below. The fits do not identify a firmware
+# current limit, so ``max_current`` is zero, which disables the limiter as in BAM's bench model.
 #
 # Native BAM requires Newton's MJWarp solver and ``SimulationCfg.use_newton_actuators=True``.
 # The task's physics preset therefore defaults to Newton; PhysX cannot execute these groups.
 
-_XH540_M6_MOTOR = BamMotorCfg(
-    model="m6",
-    kt=2.851502487440982,
-    resistance=2.2120112622593875,
-    # X-series encoder (4096 counts/rev), firmware P-gain divisor 128, and PWM limit 885 counts.
-    error_gain=(4096.0 / (2.0 * math.pi)) / (128.0 * 885.0),
-    max_pwm=1.0,
-    max_current=0.0,
-    friction_base=0.1314635138196002,
-    friction_viscous=0.06997471563975972,
-    friction_stribeck=0.017662514931086275,
-    dtheta_stribeck=0.1624445730565236,
-    alpha=22.16148451993002,
-    load_friction_motor=0.21182592876233328,
-    load_friction_external=0.029368279861542307,
-    load_friction_motor_stribeck=0.0002505631220559417,
-    load_friction_external_stribeck=0.105384339380273,
-    load_friction_motor_quad=0.009999999999999998,
-    load_friction_external_quad=2.4748954454684742e-05,
-)
+#: X-series encoder (4096 counts/rev), firmware P-gain divisor 128, and PWM limit 885 counts.
+_BAM_ERROR_GAIN = (4096.0 / (2.0 * math.pi)) / (128.0 * 885.0)
+
+
+def _find_bam_params(relative_path: str) -> Path:
+    """Return an identified BAM parameter file from the sibling ``move_actuator`` checkout."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "move_actuator" / "bam-xseries" / "params" / relative_path
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"BAM parameter file not found: move_actuator/bam-xseries/params/{relative_path}\n"
+        "Make the sibling 'move_actuator/bam-xseries' checkout available to robinion_gym."
+    )
+
+
+def _load_bam_fit(relative_path: str) -> tuple[BamMotorCfg, float]:
+    """Build the native BAM motor fit and returned rotor inertia from a parameter file.
+
+    Returns:
+        The motor configuration shared by the joints of an actuator group, and the reflected rotor
+        inertia [kg*m^2] used as the group's joint armature.
+    """
+    data = json.loads(_find_bam_params(relative_path).read_text())
+    motor = BamMotorCfg(
+        model=data["model"],
+        kt=data["kt"],
+        resistance=data["R"],
+        error_gain=_BAM_ERROR_GAIN,
+        max_pwm=1.0,
+        max_current=0.0,
+        friction_base=data["friction_base"],
+        friction_viscous=data["friction_viscous"],
+        friction_stribeck=data.get("friction_stribeck", 0.0),
+        dtheta_stribeck=data.get("dtheta_stribeck", 1.0),
+        alpha=data.get("alpha", 1.0),
+        load_friction_motor=data.get("load_friction_motor", 0.0),
+        load_friction_external=data.get("load_friction_external", 0.0),
+        load_friction_motor_stribeck=data.get("load_friction_motor_stribeck", 0.0),
+        load_friction_external_stribeck=data.get("load_friction_external_stribeck", 0.0),
+        load_friction_motor_quad=data.get("load_friction_motor_quad", 0.0),
+        load_friction_external_quad=data.get("load_friction_external_quad", 0.0),
+    )
+    return motor, float(data["armature"])
+
+
+_XH540_M6_MOTOR, _XH540_ARMATURE = _load_bam_fit("xh540/m6.json")
 """XH540-W270 ``m6`` fit from ``move_actuator/bam-xseries/params/xh540/m6.json``."""
+
+_XM430_M6_MOTOR, _XM430_ARMATURE = _load_bam_fit("xm430/m6.json")
+"""XM430-W350 ``m6`` fit from ``move_actuator/bam-xseries/params/xm430/m6.json``."""
 
 
 def _parallel_servo_motor(motor: BamMotorCfg, count: int) -> BamMotorCfg:
@@ -89,9 +121,10 @@ _XH540_M6_DUAL_MOTOR = _parallel_servo_motor(_XH540_M6_MOTOR, 2)
 """Two XH540-W270 servos driving one joint (front thighs and knees)."""
 
 #: Per-environment command latency and supply-voltage spread used for actuator domain randomization.
-#: The identified command delay is 2.55 ms (about one 400 Hz step); 1-3 steps covers the servo and
-#: bus jitter seen on hardware. The lag is held for 100 physics steps (0.25 s) with a 50% resample
-#: chance, so it changes on the timescale of a gait rather than every physics step.
+#: The identified command delays are 1.26 ms (XH540) and 1.59 ms (XM430), below one 400 Hz step;
+#: 1-3 steps covers the servo and bus jitter seen on hardware. The lag is held for 100 physics steps
+#: (0.25 s) with a 50% resample chance, so it changes on the timescale of a gait rather than every
+#: physics step.
 _BAM_MIN_DELAY = 1
 _BAM_MAX_DELAY = 3
 _BAM_DELAY_HOLD_PROB = 0.5
@@ -101,21 +134,23 @@ _BAM_VIN_RANGE = (14.0, 15.5)
 ##
 # Servo peak torque
 ##
-# The URDF takes every joint's effort limit from robinion_description/config/actuators.yaml, which maps
-# each joint to a DYNAMIXEL model and to the number of servos driving it in parallel. The peak torques
-# below are that file's `effort` values at 14.8 V, multiplied by the servo count [N·m]:
-#   XM430-W350      4.8 -> head, elbow yaw
+# The URDF takes each joint's effort limit from robinion_description/config/actuators.yaml, which maps
+# joints to a DYNAMIXEL model and to the number of servos driving them in parallel. The 540-class
+# limits below are that file's `effort` values at 14.8 V, multiplied by the servo count [N·m]:
+#   XM540-W270     12.9 -> torso, hip yaw
 #   XH540-W270     11.7 -> hip roll, front shins, ankles
-#   XM540-W270     12.9 -> torso, hip yaw, shoulders, elbow pitch
 #   XH540-W270 x2  23.4 -> front thighs, knees (two servos per joint)
+# The arms and head run 430-class servos, so they use that model's 4.8 N·m limit:
+#   430-class       4.8 -> head, shoulders, elbows
 # The two parallel-link bars (back thigh, back shin) are not mapped to a servo in that file and are
 # passive on the real robot. The USD closes their parallelogram with loop joints, so they follow the
 # driven links and must not be commanded or driven here.
 #
 # The converted USD carries the URDF velocity limits, so Isaac Lab reads those automatically and
 # they are not repeated here. It does not expose the URDF effort limits (the PhysX drive max force
-# is unset, so the joint effort limit resolves to zero), so the effort limits are declared here
-# from the URDF. BAM clips its computed motor torque to these same limits.
+# is unset, so the joint effort limit resolves to zero), so the effort limits are declared here.
+# The 430-class arms and head override the URDF's XM540 mapping with the 430-class limit. BAM clips
+# its computed motor torque to these same limits.
 
 _LEG_SINGLE_SERVO_JOINTS = [
     ".*_hip_yaw_joint",
@@ -141,15 +176,25 @@ _LEG_PEAK_TORQUE = {
 _LEG_SINGLE_PEAK_TORQUE = {name: _LEG_PEAK_TORQUE[name] for name in _LEG_SINGLE_SERVO_JOINTS}
 _LEG_DUAL_PEAK_TORQUE = {name: _LEG_PEAK_TORQUE[name] for name in _LEG_DUAL_SERVO_JOINTS}
 
-_TORSO_ARM_PEAK_TORQUE = {
+# The arms and head use 430-class servos with their own BAM fit, so they form a separate group.
+_XM430_JOINTS = [
+    ".*_shoulder_pitch_joint",
+    ".*_shoulder_roll_joint",
+    ".*_elbow_yaw_joint",
+    ".*_elbow_pitch_joint",
+    "head_yaw_joint",
+    "head_pitch_joint",
+]
+
+_TORSO_PEAK_TORQUE = {
     "torso_pitch_joint": 12.9,
-    ".*_shoulder_pitch_joint": 12.9,
-    ".*_shoulder_roll_joint": 12.9,
-    ".*_elbow_yaw_joint": 4.8,
-    ".*_elbow_pitch_joint": 12.9,
 }
 
-_HEAD_PEAK_TORQUE = {
+_XM430_PEAK_TORQUE = {
+    ".*_shoulder_pitch_joint": 4.8,
+    ".*_shoulder_roll_joint": 4.8,
+    ".*_elbow_yaw_joint": 4.8,
+    ".*_elbow_pitch_joint": 4.8,
     "head_yaw_joint": 4.8,
     "head_pitch_joint": 4.8,
 }
@@ -157,37 +202,30 @@ _HEAD_PEAK_TORQUE = {
 ##
 # Armature
 ##
-# Reflected rotor inertia from the fitted m6 model. The prior in config/actuators.yaml is 0.038
-# kg·m^2 for all three servo models; the fit gives 0.03704 kg·m^2 for the XH540-W270. Joints driven
-# by two servos in parallel carry twice that. It is added to the joint-space inertia to stabilize
-# the joint velocities.
-_SERVO_ARMATURE = 0.037040189482324744
-_DUAL_SERVO_ARMATURE = 2.0 * _SERVO_ARMATURE
+# Reflected rotor inertia identified with each motor fit: 0.0357 kg·m^2 for the XH540-W270 and
+# 0.0099 kg·m^2 for the XM430-W350. The prior in config/actuators.yaml is 0.038 for all three servo
+# models, so the new 430 fit in particular is much lighter. Joints driven by two servos in parallel
+# carry twice the single-servo value. It is added to the joint-space inertia to stabilize the joint
+# velocities.
+_DUAL_SERVO_ARMATURE = 2.0 * _XH540_ARMATURE
 
 _LEG_ARMATURE = {
-    ".*_hip_yaw_joint": _SERVO_ARMATURE,
-    ".*_hip_roll_joint": _SERVO_ARMATURE,
+    ".*_hip_yaw_joint": _XH540_ARMATURE,
+    ".*_hip_roll_joint": _XH540_ARMATURE,
     ".*_front_thigh_pitch_joint": _DUAL_SERVO_ARMATURE,
     ".*_knee_pitch_joint": _DUAL_SERVO_ARMATURE,
-    ".*_front_shin_pitch_joint": _SERVO_ARMATURE,
-    ".*_ankle_pitch_joint": _SERVO_ARMATURE,
-    ".*_ankle_roll_joint": _SERVO_ARMATURE,
+    ".*_front_shin_pitch_joint": _XH540_ARMATURE,
+    ".*_ankle_pitch_joint": _XH540_ARMATURE,
+    ".*_ankle_roll_joint": _XH540_ARMATURE,
 }
 _LEG_SINGLE_ARMATURE = {name: _LEG_ARMATURE[name] for name in _LEG_SINGLE_SERVO_JOINTS}
 _LEG_DUAL_ARMATURE = {name: _LEG_ARMATURE[name] for name in _LEG_DUAL_SERVO_JOINTS}
 
-_TORSO_ARM_ARMATURE = {
-    "torso_pitch_joint": _SERVO_ARMATURE,
-    ".*_shoulder_pitch_joint": _SERVO_ARMATURE,
-    ".*_shoulder_roll_joint": _SERVO_ARMATURE,
-    ".*_elbow_yaw_joint": _SERVO_ARMATURE,
-    ".*_elbow_pitch_joint": _SERVO_ARMATURE,
+_TORSO_ARMATURE = {
+    "torso_pitch_joint": _XH540_ARMATURE,
 }
 
-_HEAD_ARMATURE = {
-    "head_yaw_joint": _SERVO_ARMATURE,
-    "head_pitch_joint": _SERVO_ARMATURE,
-}
+_XM430_ARMATURE_TABLE = {name: _XM430_ARMATURE for name in _XM430_JOINTS}
 
 # Standing crouch of the parallelogram legs. The asset closes the linkage with loop joints, so the
 # back-thigh/back-shin bars follow the links they are tied to. They are passive: they are not part of
@@ -211,6 +249,8 @@ ROBINION_CFG = ArticulationCfg(
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             fix_root_link=False,
+            # The asset must not author a collision group that filters itself: USD treats
+            # ``physics:filteredGroups`` as a block list, which would disable self-collisions.
             enabled_self_collisions=True,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=4,
@@ -278,14 +318,8 @@ ROBINION_CFG = ArticulationCfg(
             joint_effort_limit=23.4,
             armature=0.0,
         ),
-        "torso_arms": BamActuatorCfg(
-            joint_names_expr=[
-                "torso_pitch_joint",
-                ".*_shoulder_pitch_joint",
-                ".*_shoulder_roll_joint",
-                ".*_elbow_yaw_joint",
-                ".*_elbow_pitch_joint",
-            ],
+        "torso": BamActuatorCfg(
+            joint_names_expr=["torso_pitch_joint"],
             motor=_XH540_M6_MOTOR,
             kp_fw=800.0,
             vin=14.8,
@@ -294,13 +328,13 @@ ROBINION_CFG = ArticulationCfg(
             max_delay=_BAM_MAX_DELAY,
             delay_hold_prob=_BAM_DELAY_HOLD_PROB,
             delay_update_period=_BAM_DELAY_UPDATE_PERIOD,
-            actuator_effort_limit=_TORSO_ARM_PEAK_TORQUE,
-            joint_effort_limit=_TORSO_ARM_PEAK_TORQUE,
-            armature=_TORSO_ARM_ARMATURE,
+            actuator_effort_limit=_TORSO_PEAK_TORQUE,
+            joint_effort_limit=_TORSO_PEAK_TORQUE,
+            armature=_TORSO_ARMATURE,
         ),
-        "head": BamActuatorCfg(
-            joint_names_expr=["head_yaw_joint", "head_pitch_joint"],
-            motor=_XH540_M6_MOTOR,
+        "arms_head": BamActuatorCfg(
+            joint_names_expr=_XM430_JOINTS,
+            motor=_XM430_M6_MOTOR,
             kp_fw=800.0,
             vin=14.8,
             vin_range=_BAM_VIN_RANGE,
@@ -308,9 +342,9 @@ ROBINION_CFG = ArticulationCfg(
             max_delay=_BAM_MAX_DELAY,
             delay_hold_prob=_BAM_DELAY_HOLD_PROB,
             delay_update_period=_BAM_DELAY_UPDATE_PERIOD,
-            actuator_effort_limit=_HEAD_PEAK_TORQUE,
-            joint_effort_limit=_HEAD_PEAK_TORQUE,
-            armature=_HEAD_ARMATURE,
+            actuator_effort_limit=_XM430_PEAK_TORQUE,
+            joint_effort_limit=_XM430_PEAK_TORQUE,
+            armature=_XM430_ARMATURE_TABLE,
         ),
     },
 )

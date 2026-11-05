@@ -93,6 +93,21 @@ class RobinionVelocitySceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True
     )
+    # Left-leg bodies filtered against right-leg bodies. This lets the leg termination distinguish
+    # an opposite-leg hit from a leg touching the ground or torso.
+    leg_contact = ContactSensorCfg(
+        prim_path=(
+            "{ENV_REGEX_NS}/Robot/.*/"
+            "(left_(hip|front_thigh|back_thigh|knee|front_shin|back_shin)[^/]*)$"
+        ),
+        filter_prim_paths_expr=[
+            (
+                "{ENV_REGEX_NS}/Robot/.*/"
+                "(right_(hip|front_thigh|back_thigh|knee|front_shin|back_shin)[^/]*)$"
+            )
+        ],
+        history_length=3,
+    )
 
 
 ##
@@ -129,10 +144,10 @@ class CommandsCfg:
         heading_command=False,
         debug_vis=True,
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.6, 0.8), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.3, 0.3)
+            lin_vel_x=(-0.4, 0.4), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.3, 0.3)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.6, 0.8), lin_vel_y=(-0.2, 0.2), ang_vel_z=(-0.6, 0.6)
+            lin_vel_x=(-0.8, 0.8), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.6, 0.6)
         ),
     )
 
@@ -558,7 +573,7 @@ class RewardsCfg:
     pen_self_collision = RewTerm(
         func=mdp.is_terminated_term,
         weight=-1e6,
-        params={"term_keys": ["term_self_collision"]},
+        params={"term_keys": ["term_upper_body_collision", "term_leg_leg_collision"]},
     )
 
 
@@ -570,16 +585,12 @@ class TerminationsCfg:
     term_height = DoneTerm(
         func=mdp.root_height_below_minimum, params={"minimum_height": 0.3}
     )
-    term_self_collision = DoneTerm(
+    term_upper_body_collision = DoneTerm(
         func=mdp.illegal_contact,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=[
-                    ".*thigh.*",
-                    ".*shin.*",
-                    ".*knee.*",
-                    ".*hip.*",
                     ".*elbow.*",
                     ".*shoulder.*",
                     ".*gripper.*",
@@ -588,6 +599,15 @@ class TerminationsCfg:
                     ".*head.*",
                 ],
             ),
+            "threshold": 1.0,
+        },
+    )
+    # Legs only terminate on an opposite-leg hit; ground and torso contacts are left to the
+    # height and upper-body terms.
+    term_leg_leg_collision = DoneTerm(
+        func=mdp.leg_leg_contact,
+        params={
+            "sensor_cfg": SceneEntityCfg("leg_contact"),
             "threshold": 1.0,
         },
     )
@@ -648,8 +668,9 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics = RobinionPhysicsCfg()
         # Native BAM actuator groups replace the USD drives through Newton's actuator path.
         self.sim.use_newton_actuators = True
-        # tick the contact sensor with the physics step so it samples at 200 Hz
+        # tick the contact sensors with the physics step so contacts between policy steps are kept
         self.scene.contact_forces.update_period = self.sim.dt
+        self.scene.leg_contact.update_period = self.sim.dt
 
     def play_mode(self) -> None:
         """Play-mode overrides: play with the full velocity command range and the trained push force."""

@@ -17,6 +17,8 @@ __all__ = [
     "push_robot_by_force",
     # custom curriculums
     "push_velocity_range_ramp",
+    # custom terminations
+    "leg_leg_contact",
     # custom rewards
     "joint_pos_target_l2",
     "joint_deviation_l2",
@@ -67,3 +69,4 @@ from .rewards import (
     joint_pos_target_l2,
     stand_still_drift,
 )
+from .terminations import leg_leg_contact

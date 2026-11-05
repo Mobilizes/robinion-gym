@@ -14,7 +14,7 @@ from isaaclab.utils import configclass
 if TYPE_CHECKING:
     from .bam_actuator import BAMActuator
 
-_BAM_MODEL_RELATIVE_PATH = Path("move_actuator/bam-xseries/params/xh540/m6-3.json")
+_BAM_MODEL_RELATIVE_PATH = Path("move_actuator/bam-xseries/params/xh540/m6.json")
 """Default BAM parameter file, relative to the workspace root."""
 
 
@@ -25,7 +25,7 @@ def _default_model_path() -> str:
         if candidate.is_file():
             return str(candidate)
     # Fall back to the path used by the project's run commands (repository root as CWD).
-    return "../move_actuator/bam-xseries/params/xh540/m6-3.json"
+    return "../move_actuator/bam-xseries/params/xh540/m6.json"
 
 
 @configclass
@@ -43,7 +43,7 @@ class BAMActuatorCfg(ActuatorBaseCfg):
     model_path: str = _default_model_path()
     """Path to the BAM parameter JSON file.
 
-    Defaults to the identified XH540-W270 ``m6`` model (fit ``m6-3``) in the sibling
+    Defaults to the identified XH540-W270 ``m6`` model in the sibling
     ``move_actuator/bam-xseries`` checkout.
     """
 

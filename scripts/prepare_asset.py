@@ -12,9 +12,9 @@ of truth for the mechanics. The asset is generated in three steps:
    ``urdf/robinion2.urdf`` into the layered asset ``assets/robonionv2/robinion.usda`` with its
    generated payload under ``assets/robonionv2/Payload``.
 2. The handful of things the URDF cannot express are authored on the asset interface layer: the
-   PhysX articulation root, self-collision filtering, the four parallelogram loops that tie the
-   back thigh/shin bars to the knee/ankle links, and the flat box foot sole that replaces the
-   narrow convex-hull contact of the imported foot mesh.
+   PhysX articulation root, the four parallelogram loops that tie the back thigh/shin bars to the
+   knee/ankle links, and the flat box foot sole that replaces the narrow convex-hull contact of the
+   imported foot mesh.
 3. The composed asset is flattened into the single file the articulation spawner reads.
 
 The importer ships with Isaac Sim, so the project environment needs the ``isaacsim`` extra; no Isaac Sim
@@ -43,9 +43,6 @@ ASSET_STEM = "robonionv2"
 
 #: PhysX articulation root API; the importer only applies the backend-neutral and Newton ones.
 PHYSX_ARTICULATION_API = "PhysxArticulationAPI"
-
-#: Self-collision is filtered through one group that contains every collision shape of the robot.
-SELF_COLLISION_GROUP = "RobinionSelfCollisionGroup"
 
 #: Foot collision shape. The URDF/imported foot collision mesh is a convex hull of a thin, rounded
 #: sole, so it touches the ground on a narrow strip. A flat box under the same link approximates the
@@ -220,15 +217,9 @@ def author_fixups(stage: Usd.Stage, foot_collision: str = "box") -> None:
         for foot_link_name in FOOT_LINK_NAMES:
             author_foot_sole(stage, find_prim_by_name(stage, foot_link_name))
 
-    # Self-collision is enabled by the spawner, so filter it down to the pairs the URDF resolves: one
-    # group holding every collision shape, with the group filtered against itself.
-    collider_paths = [prim.GetPath() for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.CollisionAPI)]
-    if not collider_paths:
-        raise RuntimeError("the converted asset has no collision shapes to filter")
-    group = UsdPhysics.CollisionGroup.Define(stage, physics.GetPath().AppendChild(SELF_COLLISION_GROUP))
-    group.GetCollidersCollectionAPI().CreateIncludesRel().SetTargets(collider_paths)
-    group.CreateFilteredGroupsRel().SetTargets([group.GetPath()])
-    group.CreateInvertFilteredGroupsAttr().Set(False)
+    # Self-collision is enabled by the spawner. Do not author a collision group that filters itself:
+    # in USD, ``physics:filteredGroups`` is a block list, so a group containing every collider and
+    # filtering itself disables all self-collisions instead of enabling them.
 
     # The importer emits the physics scene outside the asset; opening the layered asset in a viewer
     # needs PhysX to treat it as one.
