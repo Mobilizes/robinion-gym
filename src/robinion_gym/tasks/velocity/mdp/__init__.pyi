@@ -5,6 +5,8 @@
 
 __all__ = [
     # custom commands
+    "GaitModeCommand",
+    "GaitModeCommandCfg",
     "UniformLevelVelocityCommand",
     "UniformLevelVelocityCommandCfg",
     # custom observations
@@ -25,6 +27,8 @@ __all__ = [
     "base_height_l1",
     "base_rp_l1",
     "stand_still_drift",
+    "stand_init_pose_l1",
+    "stand_feet_air",
     "feet_gait",
     "feet_stance",
     "arm_swing_gait",
@@ -33,6 +37,7 @@ __all__ = [
     "feet_flat_contact",
     "feet_yaw_diff",
     "feet_yaw_mean",
+    "feet_yaw_l1",
     "feet_distance",
     "feet_ahead_of_base",
 ]
@@ -42,7 +47,12 @@ from isaaclab.envs.mdp import *  # noqa: F401, F403
 
 from isaaclab_tasks.core.velocity.mdp.rewards import *  # noqa: F401, F403
 
-from .commands import UniformLevelVelocityCommand, UniformLevelVelocityCommandCfg
+from .commands import (
+    GaitModeCommand,
+    GaitModeCommandCfg,
+    UniformLevelVelocityCommand,
+    UniformLevelVelocityCommandCfg,
+)
 from .curriculums import push_velocity_range_ramp
 from .events import (
     override_joint_pos_limits,
@@ -64,9 +74,12 @@ from .rewards import (
     feet_gait,
     feet_stance,
     feet_yaw_diff,
+    feet_yaw_l1,
     feet_yaw_mean,
     joint_deviation_l2,
     joint_pos_target_l2,
+    stand_feet_air,
+    stand_init_pose_l1,
     stand_still_drift,
 )
 from .terminations import leg_leg_contact

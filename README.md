@@ -5,6 +5,7 @@ An installable downstream Isaac Lab task package generated with a standard uv `s
 The registered tasks are:
 
 - `RobinionGym-Velocity-Robinion`
+- `RobinionGym-WalkInPlace-Robinion`
 
 ## Installation
 
@@ -90,6 +91,13 @@ Ubuntu 22.04 that is the bundled Humble runtime, which interoperates with the sy
 `--ros-distro system` to require an already sourced ROS 2 environment, or `--no-ros` to run playback without publishers.
 Use `--ros-domain-id` to override `ROS_DOMAIN_ID`; the subscribing shell must use the same value.
 
+`play_ros2.py` is open-loop from the real robot: the policy runs in Isaac Sim and only its joint targets reach the
+hardware. For closed-loop deployment, run the policy on the robot, subscribe to `/robinion/joint_states` and
+`/imu/data`, and publish `/robinion/joint_commands`. The sibling `move_actuator` bridge now defaults to
+`--rate 200 --state-rate 200`, sets the FTDI USB latency timer to 1 ms, and estimates whether the configured baud rate
+can carry one sync read plus one sync write in the 5 ms policy period. See `../move_actuator/README.md` for the
+2-3 Mbps bus setup and the timing report.
+
 ### Drive one robot with a keyboard or gamepad
 
 `scripts/play_control.py` runs a trained policy in exactly one environment and feeds the velocity command from live
@@ -115,12 +123,30 @@ Controls:
 | `W` / `S` | forward / backward velocity |
 | `A` / `D` | turn left / right |
 | `Q` / `E` | strafe left / right |
+| `Space` | stop walking and stand still (toggle) |
+| `G` | toggle stand / walk mode |
 | `F` | shove the robot |
 | `R` | reset the robot |
 | left stick | forward/back and strafe with analog strength |
 | right stick X | turn with analog strength |
+| gamepad `B` | stop walking and stand still (toggle) |
+| gamepad `Y` | toggle stand / walk mode |
 | gamepad `A` | shove the robot |
 | gamepad `X` | reset the robot |
+
+The stop/stand toggle (`Space`/gamepad `B`) latches a zero velocity command and selects stand mode, so the robot
+stops walking and holds still until you toggle it again. The stand/walk toggle (`G`/gamepad `Y`) switches the
+binary gait mode: walk mode follows the velocity command, and walk mode with a zero velocity command walks in
+place. Both toggles work in the main velocity task and in the zero-velocity `RobinionGym-WalkInPlace-Robinion`
+variant.
+
+Standing is a trained behavior. The velocity task samples a binary `gait_mode` command (`0` = stand, `1` = walk)
+for every environment and observes it in the actor and critic. In stand mode the velocity command is forced to
+zero and the robot is rewarded for holding the base (`rew_stand_still`) and the init joint pose
+(`rew_stand_init_pose`, a heavily weighted L1 kernel), and penalized for airborne feet (`pen_stand_feet_air`).
+In walk mode it follows the sampled velocity command; the fraction of walk-mode environments with a zero command
+(`rel_standing_envs`) walks in place. One training run therefore covers standing, walking in place, and walking.
+A checkpoint trained without these terms may keep stepping at zero command.
 
 The manual shove applies a horizontal force to every body, proportionally to its mass, for `--push-duration` seconds.
 The net force defaults to `2.5 * mass` N, and the direction is selected with
@@ -134,6 +160,106 @@ script also sets `--episode-length-s` to effectively infinity by default, so onl
 smaller value to restore periodic time-out resets. The viewport follows the robot from a close third-person view by
 default; pass `--no-follow-camera` to free-orbit. Keyboard and gamepad both work at the same time; focus the Kit window
 for input to reach the simulation.
+
+### Stand, walk, or walk in place
+
+The main `RobinionGym-Velocity-Robinion` task trains all three behaviors in one run. A binary
+`gait_mode` command is added to the command config and to both observation groups: `0` stands
+still and `1` walks. In stand mode the velocity command is forced to zero; in walk mode it is
+sampled as usual, and walk-mode environments with a zero command walk in place. The gait-shaping
+rewards (`feet_gait`, `feet_clearance`, `arm_swing_gait`) and the init-pose reward
+(`stand_init_pose_l1`) are gated on this bit, while `stand_still_drift` anchors the base against
+net drift and `stand_feet_air` makes standing strictly cheaper than stepping in stand mode.
+
+Train from scratch:
+
+```bash
+./isaaclab.sh train --task RobinionGym-Velocity-Robinion --num_envs 4096
+```
+
+A checkpoint trained before the gait-mode command has one fewer observation input.
+`scripts/pad_checkpoint_obs.py` appends the missing zero column to the actor and critic first
+layers (and their optimizer state), so the walking policy can be fine-tuned instead of retrained:
+
+```bash
+uv run python scripts/pad_checkpoint_obs.py \
+    --checkpoint logs/rsl_rl/robinion_velocity/2026-11-13_19-00-46/model_44996.pt \
+    --output logs/rsl_rl/robinion_velocity/walk-v6.1-final-padded.pt \
+    --std 0.3
+
+./isaaclab.sh train --task RobinionGym-Velocity-Robinion --num_envs 4096 \
+    --checkpoint logs/rsl_rl/robinion_velocity/walk-v6.1-final-padded.pt
+```
+
+The converged checkpoint has an exploration std near its floor, so `--std 0.3` reopens exploration;
+without it the policy can stay at its old standstill instead of discovering the walk mode. The
+padded checkpoint starts at iteration 0, so the full `max_iterations` budget applies to
+fine-tuning. From-scratch training is supported too: the push curriculum now holds the shove off
+for ~3000 iterations and ramps to the full ±1 m/s range over the next ~12000, so the policy first
+learns standing and walking without disturbances. Shorten that ramp only when warm-starting from a
+walking checkpoint.
+
+`RobinionGym-WalkInPlace-Robinion` is a zero-velocity specialization of the same task: the
+velocity ranges are zero, so walk mode means walking in place and the robot never translates.
+Use it only when you want the in-place behavior without translational commands.
+
+Use `play_control.py` with either task to toggle the mode live with `G`/gamepad `Y` or the
+stop/stand toggle (`Space`/gamepad `B`); `--start-standing` starts in stand mode instead of walk
+mode:
+
+```bash
+./isaaclab.sh -p scripts/play_control.py \
+    --task RobinionGym-Velocity-Robinion \
+    --checkpoint logs/rsl_rl/robinion_velocity/<run>/model_<iteration>.pt
+```
+
+The mode and velocity commands are resampled every 10 s by default during training, so the
+policy sees mode changes within an episode. Lengthen `resampling_time_range` in
+`CommandsCfg.gait_mode` to keep one mode per episode.
+
+### Walk in the air with a real IMU in the observation space
+
+`scripts/play_real_imu.py` runs the same trained policy, but spawns the robot at `--height` (1.5 m by default) and pins
+its root position in the air. The root orientation follows the physical IMU, so tilting or rotating the board also
+tilts and rotates the whole robot. The policy keeps commanding the walking gait, so the legs cycle while the base
+rotates. The actor's `projected_gravity` and `base_ang_vel` observations are replaced with values from the physical
+SparkFun IMU in the sibling `imu_read/` checkout:
+
+| Observation | Real-IMU source |
+| --- | --- |
+| `projected_gravity` | Gravity rotated into the IMU body frame; the first valid sample is treated as the neutral pose (`--no-imu-zero` disables that) |
+| `base_ang_vel` | Body-frame angular velocity from finite differences of successive IMU orientations (`--no-imu-ang-vel` keeps the simulated zero) |
+
+Tilt or rotate the board and the robot's body follows the same rotation while the policy sees the matching base
+observations. With the default startup zeroing the robot starts upright and rotates relative to that pose;
+`--no-imu-zero` uses the board's absolute orientation instead. Before the first valid sample, the demo uses the
+simulated base observations; after a dropout it holds the last orientation and decays the angular velocity to zero, so
+it keeps running until the sensor reconnects.
+
+The demo needs `pyserial` in the project environment and the `imu_read` checkout next to `robinion_gym` (or pointed to
+by `IMU_READ_DIR`):
+
+```bash
+# Install the serial dependency once
+uv pip install --python .venv/bin/python pyserial
+
+# Latest fully trained run, robot locked at 1.5 m, IMU auto-detected
+./isaaclab.sh -p scripts/play_real_imu.py --checkpoint walk-v6.1
+
+# Explicit port and a faster walking command
+./isaaclab.sh -p scripts/play_real_imu.py --checkpoint walk-v6.1 \
+    --imu-port /dev/ttyUSB0 --command-lin-x 0.6
+
+# Headless smoke test
+HEADLESS=1 ./isaaclab.sh -p scripts/play_real_imu.py --checkpoint walk-v6.1 \
+    --max_steps 200 --imu-wait 3
+```
+
+Useful options: `--height` moves the lock point, `--no-base-follow-imu` keeps the body upright while still injecting
+the IMU observations, `--imu-ang-vel-filter` and `--imu-ang-vel-hold` tune the reconstructed gyro, `--print-interval`
+controls the IMU/robot telemetry (it prints the injected observation values), and `--imu-wait` controls how long
+startup waits for the first valid sample. The script disables the self-collision terminations so a leg graze cannot
+reset the air-walking demo; `term_height` stays active as a safety net.
 
 ## Project structure
 

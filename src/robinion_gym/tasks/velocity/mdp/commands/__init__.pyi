@@ -4,9 +4,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    "GaitModeCommand",
+    "GaitModeCommandCfg",
     "UniformLevelVelocityCommand",
     "UniformLevelVelocityCommandCfg",
 ]
 
 from .commands_cfg import UniformLevelVelocityCommandCfg
+from .mode_command import GaitModeCommand, GaitModeCommandCfg
 from .velocity_command import UniformLevelVelocityCommand

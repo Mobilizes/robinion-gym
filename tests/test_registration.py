@@ -18,6 +18,11 @@ def test_task_registrations():
             "env_cfg_entry_point": "robinion_gym.tasks.velocity.velocity_env_cfg:RobinionVelocityEnvCfg",
             "default_agent": "rsl_rl",
         },
+        "RobinionGym-WalkInPlace-Robinion": {
+            "entry_point": "isaaclab.envs:ManagerBasedRLEnv",
+            "env_cfg_entry_point": "robinion_gym.tasks.velocity.velocity_env_cfg:RobinionWalkInPlaceEnvCfg",
+            "default_agent": "rsl_rl",
+        },
     }
 
     for task_id, expected_values in expected.items():

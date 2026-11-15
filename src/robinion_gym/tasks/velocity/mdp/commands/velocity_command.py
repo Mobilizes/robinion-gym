@@ -35,13 +35,21 @@ class UniformLevelVelocityCommand(UniformVelocityCommand):
         # per-command-period tracking counters used to advance/retreat the level
         self._num_good_steps = torch.zeros(self.num_envs, device=self.device)
         self._num_steps = torch.zeros(self.num_envs, device=self.device)
+        # environments sampled with a zero velocity command. In walk mode these become walk-in-
+        # place environments; in stand mode every environment is zeroed regardless.
+        self._zero_vel_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._walk_mode = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
     def _update_metrics(self):
         super()._update_metrics()
-        # track how often the robot follows the commanded linear velocity
-        err = torch.norm(self.vel_command_b[:, :2] - self.robot.data.root_lin_vel_b.torch[:, :2], dim=-1)
-        self._num_good_steps += (err < self.cfg.good_err_threshold).float()
-        self._num_steps += 1.0
+        # track how often the robot follows the commanded linear velocity. Only walk-mode steps
+        # advance the curriculum: standing in place must not raise the walking command level.
+        err = torch.norm(
+            self.vel_command_b[:, :2] - self.robot.data.root_lin_vel_b.torch[:, :2],
+            dim=-1,
+        )
+        self._num_good_steps += ((err < self.cfg.good_err_threshold) & self._walk_mode).float()
+        self._num_steps += self._walk_mode.float()
 
     def _resample_command(self, env_ids: Sequence[int] | slice):
         num_envs = len(range(self.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
@@ -79,8 +87,20 @@ class UniformLevelVelocityCommand(UniformVelocityCommand):
             r = torch.rand(num_envs, device=self.device)
             self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
             self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
-        # standing envs
-        self.is_standing_env[env_ids] = torch.rand(num_envs, device=self.device) <= self.cfg.rel_standing_envs
+        # zero-velocity envs (walk in place in walk mode)
+        self._zero_vel_env[env_ids] = torch.rand(num_envs, device=self.device) <= self.cfg.rel_standing_envs
+        self.is_standing_env[env_ids] = self._zero_vel_env[env_ids]
+
+    def _update_command(self):
+        """Zero the velocity command for stand-mode and walk-in-place environments."""
+        if self.cfg.gait_command_name is not None:
+            self._walk_mode[:] = self._env.command_manager.get_command(self.cfg.gait_command_name)[:, 0] > 0.5
+        else:
+            self._walk_mode[:] = True
+        # Stand mode zeroes the whole command. In walk mode only the sampled zero-command envs are
+        # zeroed, so they walk in place instead of translating.
+        self.is_standing_env[:] = self._zero_vel_env | ~self._walk_mode
+        super()._update_command()
 
     def reset(self, env_ids: Sequence[int] | None = None):
         if env_ids is None:

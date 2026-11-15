@@ -21,6 +21,17 @@ if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
 
 
+def _gait_mode_mask(env: ManagerBasedRLEnv, command_name: str | None) -> torch.Tensor:
+    """Return a per-environment mask that is one when the binary gait command is set.
+
+    ``command_name`` refers to a command term whose first element is 0 for standing and 1 for
+    walking. Passing ``None`` disables the gate and returns ones for every environment.
+    """
+    if command_name is None:
+        return torch.ones(env.num_envs, device=env.device)
+    return (env.command_manager.get_command(command_name)[:, 0] > 0.5).float()
+
+
 def joint_pos_target_l2(
     env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg
 ) -> torch.Tensor:
@@ -142,6 +153,50 @@ class stand_still_drift(ManagerTermBase):
         self._standing[env_ids] = False
 
 
+def stand_init_pose_l1(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    std: float = 0.5,
+    gait_command_name: str | None = None,
+    command_name: str | None = None,
+    command_threshold: float = 1.0e-3,
+) -> torch.Tensor:
+    """Reward standing environments for holding the initial joint pose with an L1 kernel.
+
+    The error is the sum of absolute joint deviations from the articulation's default (init) joint
+    position. The exponential kernel keeps a constant pull toward the init pose for small errors,
+    unlike an L2 kernel whose gradient fades out near the target, so the stance is held tightly.
+
+    The standing mask comes from either the binary gait command (``gait_command_name``) or a
+    velocity command whose full command norm is near zero (``command_name``). The term is zero
+    while walking, so it does not fight the gait.
+
+    Args:
+        asset_cfg: The articulation and the joints whose pose is held.
+        std: Scale (rad) of the summed L1 error in the exponential kernel; smaller values pull
+            harder on every radian of deviation.
+        gait_command_name: Name of the binary stand/walk command term.
+        command_name: Name of the velocity command term used as the standing gate.
+        command_threshold: Full command norm (m/s and rad/s) below which the robot counts as
+            standing.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    deviation = (
+        asset.data.joint_pos.torch[:, asset_cfg.joint_ids]
+        - asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
+    )
+    reward = torch.exp(-torch.sum(torch.abs(deviation), dim=-1) / std)
+
+    if gait_command_name is not None:
+        standing = 1.0 - _gait_mode_mask(env, gait_command_name)
+    elif command_name is not None:
+        command = env.command_manager.get_command(command_name)
+        standing = (torch.norm(command, dim=-1) <= command_threshold).float()
+    else:
+        standing = torch.zeros(env.num_envs, device=env.device)
+    return standing * reward
+
+
 def feet_gait(
     env: ManagerBasedRLEnv,
     period: float,
@@ -150,6 +205,7 @@ def feet_gait(
     swing_center: float = 0.25,
     swing_period: float = 0.4,
     command_name=None,
+    gait_command_name=None,
 ) -> torch.Tensor:
     """Reward feet for swinging (being airborne) during their expected swing phase.
 
@@ -157,7 +213,10 @@ def feet_gait(
     center of its gait phase and the foot is not in contact with the ground. This is similar to
     a swing reward that rewards feet that are expected to swing but are currently airborne.
 
-    If the commands are small (i.e. the agent is not supposed to walk), then the reward is zero.
+    If ``command_name`` is given and the commanded velocity is small (i.e. the agent is not
+    supposed to walk), then the reward is zero. If ``gait_command_name`` is given, the reward is
+    additionally gated by a binary gait command, so a robot can walk in place while its
+    velocity command is zero.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     is_contact = (
@@ -181,6 +240,8 @@ def feet_gait(
     if command_name is not None:
         cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
         reward *= cmd_norm > 1.0e-8
+    if gait_command_name is not None:
+        reward *= _gait_mode_mask(env, gait_command_name)
     return reward
 
 
@@ -240,18 +301,23 @@ def arm_swing_gait(
     std: float,
     phase_offset: float = 0.0,
     command_name: str | None = None,
+    gait_command_name: str | None = None,
 ) -> torch.Tensor:
-    """Reward arm swinging that is phase-locked to the same-side leg gait.
+    """Reward arm swinging that is phase-locked to the gait cycle.
 
-    Each arm's shoulder joint is driven to track a sinusoidal reference with the same ``period``
-    and per-arm ``offset`` as the leg gait, so the left arm swings with the left leg and the right
-    arm with the right leg. Setting ``phase_offset`` to :math:`\\pi` makes each arm swing while the
-    same-side leg is in its support (stance) phase, counter-balancing the legs and improving
-    stability.
+    Each arm's shoulder joint tracks a sinusoidal reference with the gait ``period``. The
+    per-arm ``offset`` is in joint space, so the mapping to world-space arm motion depends on the
+    joint axes: the left and right shoulder-pitch axes are mirrored in the asset, and equal
+    offsets (e.g. ``[0.0, 0.0]``) therefore produce contralateral swing, with each arm moving
+    opposite its same-side leg. Setting ``phase_offset`` to :math:`\\pi` makes each arm swing
+    forward while the same-side leg is in its support (stance) phase, counter-balancing the legs
+    and improving stability.
 
     The oscillation is centered on the neutral (zero) joint position, so the arms swing about the
     hanging pose rather than a fixed forward offset. If ``command_name`` is given, the reward is
-    zero whenever the commanded velocity is (near) zero.
+    zero whenever the commanded velocity is (near) zero. If ``gait_command_name`` is given, the
+    reward is additionally gated by the binary gait command, so the arms swing while walking in
+    place even though the velocity command is zero.
     """
     asset: Articulation = env.scene[asset_cfg.name]
 
@@ -269,6 +335,8 @@ def arm_swing_gait(
     if command_name is not None:
         cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
         reward *= cmd_norm > 1.0e-8
+    if gait_command_name is not None:
+        reward *= _gait_mode_mask(env, gait_command_name)
     return reward
 
 
@@ -279,12 +347,14 @@ def feet_clearance(
     std: float,
     tanh_mult: float,
     command_name: str | None = None,
+    gait_command_name: str | None = None,
 ) -> torch.Tensor:
     """Reward the swinging feet for clearing at least ``min_height`` off the ground.
 
     Only the shortfall below ``min_height`` is penalized, and only while the foot moves
     horizontally, so a swinging foot is free to lift higher than the minimum and a planted foot is
-    left unpenalized.
+    left unpenalized. If ``gait_command_name`` is given, the reward is additionally gated by the
+    binary gait command, so a robot can walk in place while its velocity command is zero.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     foot_z = asset.data.body_pos_w.torch[:, asset_cfg.body_ids, 2]
@@ -299,6 +369,8 @@ def feet_clearance(
     if command_name is not None:
         cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
         reward *= cmd_norm > 1.0e-8
+    if gait_command_name is not None:
+        reward *= _gait_mode_mask(env, gait_command_name)
     return reward
 
 
@@ -348,6 +420,39 @@ def feet_flat_contact(
 
     flatness = torch.clamp(up_world[..., 2], min=0.0)
     return torch.sum(flatness.pow(2) * is_contact.float() * in_support.float(), dim=-1)
+
+
+def stand_feet_air(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    gait_command_name: str | None = None,
+    command_name: str | None = None,
+    force_threshold: float = 1.0,
+    command_threshold: float = 1.0e-3,
+) -> torch.Tensor:
+    """Penalize airborne feet while the robot is commanded to stand still.
+
+    The standing mask comes from either the binary gait command (``gait_command_name``) or a
+    velocity command whose full command norm is near zero (``command_name``). The value is the
+    number of feet that are not in contact with the ground, multiplied by the standing mask. It is
+    zero while walking, so the penalty makes standing strictly cheaper than stepping without
+    constraining the gait.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    is_contact = (
+        torch.norm(
+            contact_sensor.data.net_forces_w.torch[:, sensor_cfg.body_ids], dim=-1
+        )
+        > force_threshold
+    )
+    if gait_command_name is not None:
+        standing = 1.0 - _gait_mode_mask(env, gait_command_name)
+    elif command_name is not None:
+        command = env.command_manager.get_command(command_name)
+        standing = (torch.norm(command, dim=-1) <= command_threshold).float()
+    else:
+        standing = torch.zeros(env.num_envs, device=env.device)
+    return standing * (~is_contact).float().sum(dim=-1)
 
 
 def feet_flat(
@@ -411,6 +516,37 @@ def feet_yaw_mean(
     return torch.square(
         (base_yaw - feet_yaw_mean + torch.pi) % (2 * torch.pi) - torch.pi
     )
+
+
+def feet_yaw_l1(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str | None = None,
+    full_gate_vel: float = 0.3,
+) -> torch.Tensor:
+    """Penalize each foot's yaw relative to the base with an L1 (absolute) kernel.
+
+    Unlike :func:`feet_yaw_mean`, which compares the base yaw against the mean of the two foot
+    yaws, this term penalizes every foot independently, so a yaw error on one foot is not averaged
+    away by the other foot. Unlike the squared kernels in :func:`feet_yaw_diff` and
+    :func:`feet_yaw_mean`, the gradient magnitude does not shrink with the error, so a small but
+    persistent swing-leg yaw offset is corrected as strongly as a large one.
+
+    If ``command_name`` is given, the penalty is gated by the commanded yaw rate: it runs at full
+    weight when the command is straight (``cmd_yaw == 0``) and fades to zero as ``|cmd_yaw|``
+    reaches ``full_gate_vel``. Turning in place requires the swing leg to yaw relative to the base
+    so the foot can be placed along the new heading, so the constraint is released while turning.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    feet_yaw = _get_feet_yaw(env, asset_cfg)
+    base_yaw = euler_xyz_from_quat(asset.data.root_quat_w.torch)[2]
+    error = (feet_yaw - base_yaw.unsqueeze(-1) + torch.pi) % (2 * torch.pi) - torch.pi
+    value = torch.sum(torch.abs(error), dim=-1)
+    if command_name is not None:
+        cmd_yaw = env.command_manager.get_command(command_name)[:, 2]
+        gate = torch.clip(1.0 - torch.abs(cmd_yaw) / full_gate_vel, min=0.0, max=1.0)
+        value = value * gate
+    return value
 
 
 def feet_ahead_of_base(

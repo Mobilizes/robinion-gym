@@ -10,12 +10,22 @@ The script mirrors the ``isaaclab play`` workflow for the registered
 velocity command generator with a teleoperation command built from live input:
 
 * Keyboard: ``W``/``S`` forward/back, ``A``/``D`` turn, ``Q``/``E`` strafe,
-  ``F`` shove the robot, ``R`` reset the robot.
+  ``Space`` stop/stand, ``G`` toggle stand/walk, ``F`` shove the robot, ``R`` reset the robot.
 * Gamepad: left stick forward/strafe with analog strength, right stick turn with analog
-  strength, ``A`` shove the robot, ``X`` reset the robot.
+  strength, ``B`` stop/stand, ``Y`` toggle stand/walk, ``A`` shove the robot, ``X`` reset the
+  robot.
+
+The stop/stand toggle (``Space``/``B``) latches a zero velocity command, so the robot stops
+walking and holds still until the toggle is pressed again. The stand/walk toggle (``G``/``Y``)
+switches the binary gait mode: walk mode with a zero velocity command walks in place, and stand
+mode forces the velocity command to zero and holds the init pose.
 
 Keyboard and gamepad can be used at the same time. Command changes are low-pass filtered so
 taps and stick motion do not step the policy, and the gamepad sticks use a radial deadzone.
+
+The playback loop prints the left-right foot separation every ``--feet-print-interval`` seconds:
+the signed lateral distance in the base heading frame, the full 3D distance, and the vertical
+difference between the feet. Set the interval to 0 to disable the printout.
 
 The manual shove applies a horizontal force to the robot for a short duration, with the
 direction fixed relative to the robot heading when the key/button is pressed. A red arrow
@@ -78,6 +88,8 @@ class InputState:
     lin_x: float = 0.0
     lin_y: float = 0.0
     ang_z: float = 0.0
+    toggle_stand: bool = False
+    toggle_gait: bool = False
     push: bool = False
     reset: bool = False
 
@@ -97,6 +109,8 @@ class KeyboardGamepadInput:
         "turn_right": "D",
         "strafe_left": "Q",
         "strafe_right": "E",
+        "toggle_stand": "SPACE",
+        "toggle_gait": "G",
         "push": "F",
         "reset": "R",
     }
@@ -144,6 +158,8 @@ class KeyboardGamepadInput:
                     flush=True,
                 )
 
+        self._prev_toggle_stand = False
+        self._prev_toggle_gait = False
         self._prev_push = False
         self._prev_reset = False
 
@@ -241,10 +257,16 @@ class KeyboardGamepadInput:
         lin_x_kb, lin_y_kb, ang_z_kb = self._keyboard_sticks()
         lin_x_gp, lin_y_gp, ang_z_gp = self._gamepad_sticks()
 
+        stand_down = (self._keyboard is not None and self._key_down("toggle_stand")) or self._gamepad_down("B")
+        toggle_down = (self._keyboard is not None and self._key_down("toggle_gait")) or self._gamepad_down("Y")
         push_down = (self._keyboard is not None and self._key_down("push")) or self._gamepad_down("A")
         reset_down = (self._keyboard is not None and self._key_down("reset")) or self._gamepad_down("X")
+        toggle_stand = stand_down and not self._prev_toggle_stand
+        toggle_gait = toggle_down and not self._prev_toggle_gait
         push = push_down and not self._prev_push
         reset = reset_down and not self._prev_reset
+        self._prev_toggle_stand = stand_down
+        self._prev_toggle_gait = toggle_down
         self._prev_push = push_down
         self._prev_reset = reset_down
 
@@ -252,6 +274,8 @@ class KeyboardGamepadInput:
             lin_x=max(-1.0, min(1.0, lin_x_kb + lin_x_gp)),
             lin_y=max(-1.0, min(1.0, lin_y_kb + lin_y_gp)),
             ang_z=max(-1.0, min(1.0, ang_z_kb + ang_z_gp)),
+            toggle_stand=toggle_stand,
+            toggle_gait=toggle_gait,
             push=push,
             reset=reset,
         )
@@ -522,21 +546,64 @@ def _run_playback(
     command_term = unwrapped.command_manager.get_term(args_cli.command_term)
     step_dt = unwrapped.step_dt
     limits = _command_limits(command_term, args_cli)
+    robot = unwrapped.scene["robot"]
+    left_foot_ids, _ = robot.find_bodies("left_foot.*")
+    right_foot_ids, _ = robot.find_bodies("right_foot.*")
+    feet_print_every = 0
+    if args_cli.feet_print_interval > 0.0 and left_foot_ids and right_foot_ids:
+        feet_print_every = max(1, round(args_cli.feet_print_interval / step_dt))
     command = torch.zeros(3, device=unwrapped.device)
     smoothing = args_cli.command_smoothing
     num_steps = 0
+    stand_mode = bool(args_cli.start_standing)
 
-    # The play loop owns the command buffer. Preventing resampling keeps the command stable
-    # across the automatic reset that follows a fall.
+    # The play loop owns the command buffers. Preventing resampling keeps the velocity command
+    # stable across the automatic reset that follows a fall and keeps the gait mode latched.
     command_term._resample_command = lambda env_ids: None
     _apply_command(command_term, command)
+
+    gait_term = None
+    if args_cli.gait_mode_term in unwrapped.command_manager.active_terms:
+        gait_term = unwrapped.command_manager.get_term(args_cli.gait_mode_term)
+        gait_term._resample_command = lambda env_ids: None
+        gait_mode = 0.0 if stand_mode else 1.0
+        gait_term._command[:] = gait_mode
+        print(
+            f"[INFO] Gait mode: {'walk' if gait_mode > 0.5 else 'stand'}. Press G or gamepad Y to toggle.",
+            flush=True,
+        )
     obs, _ = env.reset()
 
-    print("[INFO] Playback is running, press Ctrl+C to stop.", flush=True)
+    print(
+        "[INFO] Playback is running, press Space or gamepad B to stand, Ctrl+C to stop.",
+        flush=True,
+    )
     try:
         while unwrapped.sim.is_running() and not unwrapped.sim.is_stopped():
             step_start = time.time()
             state = input_source.advance()
+
+            if state.toggle_stand:
+                stand_mode = not stand_mode
+                if stand_mode:
+                    command.zero_()
+                    _apply_command(command_term, command)
+                if gait_term is not None:
+                    gait_mode = 0.0 if stand_mode else 1.0
+                    gait_term._command[:] = gait_mode
+                print(f"[INFO] {'Standing' if stand_mode else 'Walk mode'}.", flush=True)
+
+            if state.toggle_gait and gait_term is not None:
+                gait_mode = 1.0 - gait_mode
+                gait_term._command[:] = gait_mode
+                stand_mode = gait_mode < 0.5
+                if stand_mode:
+                    command.zero_()
+                    _apply_command(command_term, command)
+                print(
+                    f"[INFO] Gait mode: {'walk' if gait_mode > 0.5 else 'stand'}",
+                    flush=True,
+                )
 
             if state.reset:
                 pusher.cancel()
@@ -549,7 +616,10 @@ def _run_playback(
                 print("[INFO] Robot reset.", flush=True)
                 continue
 
-            target = torch.tensor([state.lin_x, state.lin_y, state.ang_z], device=command.device) * limits
+            if stand_mode:
+                target = torch.zeros_like(command)
+            else:
+                target = torch.tensor([state.lin_x, state.lin_y, state.ang_z], device=command.device) * limits
             alpha = 1.0 - math.exp(-step_dt / smoothing) if smoothing > 0.0 else 1.0
             command += alpha * (target - command)
             _apply_command(command_term, command)
@@ -572,6 +642,19 @@ def _run_playback(
             pusher.update(step_dt)
 
             num_steps += 1
+            if feet_print_every and num_steps % feet_print_every == 0:
+                body_pos = robot.data.body_pos_w.torch[0]
+                left_pos = body_pos[left_foot_ids[0]]
+                right_pos = body_pos[right_foot_ids[0]]
+                delta = left_pos - right_pos
+                base_yaw = euler_xyz_from_quat(robot.data.root_quat_w.torch)[2][0]
+                lateral = torch.cos(base_yaw) * delta[1] - torch.sin(base_yaw) * delta[0]
+                print(
+                    f"[INFO] feet distance: lateral={lateral.item():+.3f} m "
+                    f"3d={torch.linalg.norm(delta).item():.3f} m "
+                    f"dz={delta[2].item():+.3f} m",
+                    flush=True,
+                )
             if args_cli.max_steps is not None and num_steps >= args_cli.max_steps:
                 break
             if args_cli.real_time:
@@ -589,9 +672,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Play a trained Robinion policy with keyboard/gamepad control and manual force pushes.",
     )
-    parser.add_argument("--task", type=str, default="RobinionGym-Velocity-Robinion", help="Name of the task.")
     parser.add_argument(
-        "--agent", type=str, default="rsl_rl_cfg_entry_point", help="RL agent configuration entry point."
+        "--task",
+        type=str,
+        default="RobinionGym-Velocity-Robinion",
+        help="Name of the task.",
+    )
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default="rsl_rl_cfg_entry_point",
+        help="RL agent configuration entry point.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -599,7 +690,12 @@ def main() -> None:
         default="latest",
         help="Checkpoint path, a run directory, or 'latest'/'best'.",
     )
-    parser.add_argument("--experiment_name", type=str, default=None, help="Override the agent's experiment name.")
+    parser.add_argument(
+        "--experiment_name",
+        type=str,
+        default=None,
+        help="Override the agent's experiment name.",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
     parser.add_argument("--max_steps", type=int, default=None, help="Stop after this many policy steps.")
     parser.add_argument(
@@ -619,6 +715,21 @@ def main() -> None:
         type=str,
         default="base_velocity",
         help="Name of the velocity command term to drive.",
+    )
+    parser.add_argument(
+        "--gait-mode-term",
+        type=str,
+        default="gait_mode",
+        help="Name of the binary stand/walk command term. Ignored when the task has no such term.",
+    )
+    parser.add_argument(
+        "--start-standing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Start with the stop/stand latch engaged: zero velocity, and stand mode when the task "
+            "has a gait-mode command."
+        ),
     )
     parser.add_argument(
         "--input",
@@ -644,6 +755,12 @@ def main() -> None:
         type=float,
         default=0.15,
         help="Low-pass time constant for command changes in seconds; 0 disables smoothing.",
+    )
+    parser.add_argument(
+        "--feet-print-interval",
+        type=float,
+        default=0.5,
+        help=("Print the left-right foot separation every N seconds; 0 disables the printout."),
     )
     parser.add_argument(
         "--max-lin-vel-x",
@@ -806,8 +923,8 @@ def main() -> None:
         )
 
         print(
-            "[INFO] Controls: W/S forward/back, A/D turn, Q/E strafe, F push, R reset. "
-            "Gamepad: left stick move, right stick turn, A push, X reset.",
+            "[INFO] Controls: W/S forward/back, A/D turn, Q/E strafe, G stand/walk, F push, R reset. "
+            "Gamepad: left stick move, right stick turn, Y stand/walk, A push, X reset.",
             flush=True,
         )
         try:

@@ -22,6 +22,12 @@ class UniformLevelVelocityCommandCfg(UniformVelocityCommandCfg):
     limit_ranges: UniformVelocityCommandCfg.Ranges = MISSING
     """The velocity command ranges at the maximum level (level 1)."""
 
+    gait_command_name: str | None = None
+    """Name of the binary stand/walk command term.
+
+    When set, the velocity command is zeroed for environments in stand mode (``gait_mode == 0``).
+    """
+
     good_err_threshold: float = 0.15
     """The linear velocity tracking error (in m/s) below which tracking is considered good."""
 

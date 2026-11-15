@@ -136,13 +136,26 @@ class ActionsCfg:
 class CommandsCfg:
     """Command specifications for the MDP"""
 
+    # One run trains all three behaviors: stand (0), walk in place (1 + zero velocity), and walk
+    # (1 + nonzero velocity). The mode is resampled on the same period as the velocity command so
+    # the policy sees mode changes; lengthen it to keep one mode per episode. It is declared first
+    # so the command manager resamples it before the velocity command reads it in the same step.
+    gait_mode = mdp.GaitModeCommandCfg(
+        resampling_time_range=(10.0, 10.0),
+        walk_probability=0.5,
+    )
+
     base_velocity = mdp.UniformLevelVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.05,
+        # A fraction of walk-mode environments gets the whole velocity command zeroed by the
+        # command generator. Those environments walk in place; the rest translate. The gait mode
+        # above overrides the command to zero in stand mode.
+        rel_standing_envs=0.15,
         rel_heading_envs=1.0,
         heading_command=False,
         debug_vis=True,
+        gait_command_name="gait_mode",
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
             lin_vel_x=(-0.4, 0.4), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.3, 0.3)
         ),
@@ -181,6 +194,11 @@ class ObservationsCfg:
             func=mdp.gait_phase, params={"period": 0.4, "offset": [0.0, 0.5]}
         )
         last_action = ObsTerm(func=mdp.last_action)
+        # Appended last so ``scripts/pad_checkpoint_obs.py`` can widen a pre-mode checkpoint's
+        # first layer without shifting the existing observation columns.
+        gait_mode = ObsTerm(
+            func=mdp.generated_commands, params={"command_name": "gait_mode"}
+        )
 
         def __post_init__(self) -> None:
             self.enable_corruption = True
@@ -205,6 +223,9 @@ class ObservationsCfg:
             func=mdp.gait_phase, params={"period": 0.4, "offset": [0.0, 0.5]}
         )
         last_action = ObsTerm(func=mdp.last_action)
+        gait_mode = ObsTerm(
+            func=mdp.generated_commands, params={"command_name": "gait_mode"}
+        )
 
     # privileged observations
     critic: CriticCfg = CriticCfg()
@@ -212,10 +233,11 @@ class ObservationsCfg:
 
 # Push strength (base velocity change, m/s) used in training: the curriculum ramps from no push up
 # to this range. The event default is kept on the same value so a rollout without the curriculum
-# (play mode, tests) never shoves the robot harder than the policy was trained for.
+# (play mode, tests) never shoves the robot harder than the policy was trained for. With the ~8 kg
+# robot, 1 m/s over the 0.2 s push is about 40 N, matching the manual shove used in play_control.
 _PUSH_VELOCITY_RANGE: dict[str, tuple[float, float]] = {
-    "x": (-0.4, 0.4),
-    "y": (-0.4, 0.4),
+    "x": (-1.0, 1.0),
+    "y": (-1.0, 1.0),
 }
 
 
@@ -369,16 +391,34 @@ class RewardsCfg:
     # still is still worse than walking.
     pen_termination = RewTerm(func=mdp.is_terminated, weight=-20.0)
 
-    # rew_stand_still = RewTerm(
-    #     func=mdp.stand_still_drift,
-    #     weight=0.75,
-    #     params={
-    #         "command_name": "base_velocity",
-    #         "std": 0.05,
-    #         "time_constant": 1.0,
-    #         "asset_cfg": SceneEntityCfg("robot"),
-    #     },
-    # )
+    # Explicitly reward holding the base still when the linear command is zero. Without this,
+    # the zero-command standing environments alone are too weak a signal and the policy keeps
+    # stepping.
+    rew_stand_still = RewTerm(
+        func=mdp.stand_still_drift,
+        weight=0.75,
+        params={
+            "command_name": "base_velocity",
+            "std": 0.05,
+            "time_constant": 1.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # Standing also means holding the init pose, not just avoiding base drift: without this the
+    # policy can stand in an arbitrary stance (one foot forward, a wide stance, or a deep crouch)
+    # and still collect the drift reward. The L1 kernel pulls on small deviations instead of
+    # fading out like an L2 kernel, and the heavy weight makes the init pose the dominant standing
+    # behavior. The term is gated on the stand/walk mode, so it is zero while walking.
+    rew_stand_init_pose = RewTerm(
+        func=mdp.stand_init_pose_l1,
+        weight=10.0,
+        params={
+            "gait_command_name": "gait_mode",
+            "std": 0.5,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
 
     # rew_feet_flat_contact = RewTerm(
     #     func=mdp.feet_flat_contact,
@@ -400,6 +440,16 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
     )
 
+    # Make standing strictly cheaper than stepping while the mode is stand.
+    pen_stand_feet_air = RewTerm(
+        func=mdp.stand_feet_air,
+        weight=-0.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+            "gait_command_name": "gait_mode",
+        },
+    )
+
     # rew_feet_air_time = RewTerm(
     #     func=mdp.feet_air_time_positive_biped,
     #     weight=1.0,
@@ -419,7 +469,7 @@ class RewardsCfg:
             "swing_center": 0.25,
             "swing_period": 0.4,
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
-            "command_name": "base_velocity",
+            "gait_command_name": "gait_mode",
         },
     )
 
@@ -444,7 +494,7 @@ class RewardsCfg:
             "min_height": 0.075,
             "std": 0.05,
             "tanh_mult": 2.0,
-            "command_name": "base_velocity",
+            "gait_command_name": "gait_mode",
         },
     )
 
@@ -453,12 +503,15 @@ class RewardsCfg:
         weight=1.5,
         params={
             "period": 0.4,
+            # The right shoulder-pitch axis is -Y and the left is +Y, so the same joint-space
+            # target already produces contralateral (natural) arm swing. A 0.5 phase offset gives
+            # the arms opposite joint targets and makes both arms move in the same world direction.
             "offset": [0.0, 0.0],
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_pitch_joint"),
             "amplitude": 0.2,
             "std": 0.1,
             "phase_offset": math.pi,
-            "command_name": "base_velocity",
+            "gait_command_name": "gait_mode",
         },
     )
 
@@ -558,13 +611,22 @@ class RewardsCfg:
         weight=-2.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
     )
+    pen_feet_yaw_l1 = RewTerm(
+        func=mdp.feet_yaw_l1,
+        weight=-1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
+            "command_name": "base_velocity",
+            "full_gate_vel": 0.3,
+        },
+    )
     pen_feet_distance = RewTerm(
         func=mdp.feet_distance,
-        weight=-2.0,
+        weight=-5.0,
         params={
             "left_foot_cfg": SceneEntityCfg("robot", body_names="left_foot.*"),
             "right_foot_cfg": SceneEntityCfg("robot", body_names="right_foot.*"),
-            "target_distance": 0.12,
+            "target_distance": 0.10,
             "command_name": "base_velocity",
             "full_gate_vel": 0.3,
         },
@@ -617,19 +679,20 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    # Stage the push disturbance: the full shove arrives before the policy can recover from it
-    # (every episode then ends at its first push), so start with no shove and ramp linearly to the
-    # trained range. The ramp is keyed on environment steps: 48 steps = 1 iteration, so 240000
-    # steps is ~5000 iterations to reach the full shove. Progress is logged under
-    # "Curriculum/push_velocity_ramp".
+    # Stage the push disturbance: the full shove arrives before a from-scratch policy can recover
+    # from it (every episode then ends at its first push), so start with no shove and ramp slowly
+    # to the trained range. The ramp is keyed on environment steps: 48 steps = 1 iteration, so
+    # 144000 steps is ~3000 iterations of unperturbed gait learning and 720000 steps is ~15000
+    # iterations to reach the full shove. This leaves ~5000 iterations at full strength inside the
+    # 20000-iteration budget. Progress is logged under "Curriculum/push_velocity_ramp".
     push_velocity_ramp = CurrTerm(
         func=mdp.push_velocity_range_ramp,
         params={
             "event_name": "push_robot",
             "initial_range": {"x": (-0.0, 0.0), "y": (-0.0, 0.0)},
             "final_range": dict(_PUSH_VELOCITY_RANGE),
-            "start_step": 48000,
-            "end_step": 300000,
+            "start_step": 144000,
+            "end_step": 720000,
         },
     )
 
@@ -686,3 +749,27 @@ class RobinionVelocityEnvCfg(ManagerBasedRLEnvCfg):
                 push_ramp.params["final_range"]
             )
         self.curriculum.push_velocity_ramp = None
+
+
+@configclass
+class RobinionWalkInPlaceEnvCfg(RobinionVelocityEnvCfg):
+    """Zero-velocity specialization of the merged task.
+
+    The robot never translates. The walk/stand bit selects between walking in place (1) and
+    standing still (0), while the sampled velocity command stays zero in both modes. The parent
+    task already contains all three behaviors; this variant is useful for training or playing the
+    in-place gait without translational commands.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+
+        # The robot never translates: the mode selects walking in place versus standing.
+        cmd = self.commands.base_velocity
+        cmd.ranges = mdp.UniformLevelVelocityCommandCfg.Ranges(
+            lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(0.0, 0.0)
+        )
+        cmd.limit_ranges = mdp.UniformLevelVelocityCommandCfg.Ranges(
+            lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(0.0, 0.0)
+        )
+        cmd.rel_standing_envs = 0.0
