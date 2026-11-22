@@ -32,6 +32,29 @@ def _gait_mode_mask(env: ManagerBasedRLEnv, command_name: str | None) -> torch.T
     return (env.command_manager.get_command(command_name)[:, 0] > 0.5).float()
 
 
+def _push_recovery_mask(env: ManagerBasedRLEnv, event_name: str | None) -> torch.Tensor:
+    """Return the per-environment push-recovery mask, or all-false when unavailable.
+
+    The push event exposes ``recovery_mask`` while a push is active and for a short settle window
+    afterwards. Posture and ankle shaping terms multiply their value by ``1 - mask`` so the policy
+    may take a recovery step or brace with its ankles instead of being pulled back into the
+    standing pose during the disturbance.
+    """
+    no_mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if event_name is None:
+        return no_mask
+    try:
+        func = env.event_manager.get_term_cfg(event_name).func
+    except (KeyError, ValueError):
+        return no_mask
+    mask = getattr(func, "recovery_mask", None)
+    # The event manager may not have instantiated the class term yet; ``getattr`` on the class
+    # returns the property descriptor rather than a tensor in that case.
+    if not isinstance(mask, torch.Tensor):
+        return no_mask
+    return mask
+
+
 def joint_pos_target_l2(
     env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg
 ) -> torch.Tensor:
@@ -45,15 +68,88 @@ def joint_pos_target_l2(
 
 
 def joint_deviation_l2(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg | None = None,
+    push_event_name: str | None = None,
 ) -> torch.Tensor:
-    """Penalize joint positions that deviate from the default one (squared L2)."""
+    """Penalize joint positions that deviate from the default one (squared L2).
+
+    If ``push_event_name`` is given, the penalty is disabled for environments inside a push
+    recovery window so the joints can move to recover from the shove.
+    """
+    if asset_cfg is None:
+        asset_cfg = SceneEntityCfg("robot")
     asset: Articulation = env.scene[asset_cfg.name]
     deviation = (
         asset.data.joint_pos.torch[:, asset_cfg.joint_ids]
         - asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
     )
-    return torch.sum(torch.square(deviation), dim=-1)
+    value = torch.sum(torch.square(deviation), dim=-1)
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
+    return value
+
+
+def joint_deviation_l1_gated(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg | None = None,
+    push_event_name: str | None = None,
+) -> torch.Tensor:
+    """Penalize joint deviation from the default pose with L1, gated off during push recovery."""
+    if asset_cfg is None:
+        asset_cfg = SceneEntityCfg("robot")
+    asset: Articulation = env.scene[asset_cfg.name]
+    deviation = (
+        asset.data.joint_pos.torch[:, asset_cfg.joint_ids]
+        - asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
+    )
+    value = torch.sum(torch.abs(deviation), dim=-1)
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
+    return value
+
+
+def joint_vel_l2_gated(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg | None = None,
+    push_event_name: str | None = None,
+) -> torch.Tensor:
+    """Penalize joint velocity with L2, gated off during push recovery."""
+    if asset_cfg is None:
+        asset_cfg = SceneEntityCfg("robot")
+    asset: Articulation = env.scene[asset_cfg.name]
+    value = torch.sum(
+        torch.square(asset.data.joint_vel.torch[:, asset_cfg.joint_ids]), dim=-1
+    )
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
+    return value
+
+
+def feet_slide_gated(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg | None = None,
+    push_event_name: str | None = None,
+) -> torch.Tensor:
+    """Penalize foot sliding, gated off during push recovery so a recovery step can slide."""
+    if asset_cfg is None:
+        asset_cfg = SceneEntityCfg("robot")
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    asset: Articulation = env.scene[asset_cfg.name]
+    contacts = (
+        contact_sensor.data.net_normal_forces_w_history.torch[
+            :, :, sensor_cfg.body_ids, :
+        ]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    body_vel = asset.data.body_lin_vel_w.torch[:, asset_cfg.body_ids, :2]
+    value = torch.sum(body_vel.norm(dim=-1) * contacts, dim=1)
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
+    return value
 
 
 def base_height_l1(
@@ -110,6 +206,8 @@ class stand_still_drift(ManagerTermBase):
         time_constant: Time constant (s) of the low-pass filter. Must be well above the gait period
             so the per-step oscillation is averaged out; around 1 s works for the 0.4 s gait clock.
         command_threshold: Linear command norm (m/s) below which the term is active.
+        push_event_name: Optional push event whose recovery mask disables the drift reward while
+            the robot is being shoved, so its recovery motion is not penalized as drift.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedEnv):
@@ -127,6 +225,7 @@ class stand_still_drift(ManagerTermBase):
         std: float = 0.05,
         time_constant: float = 1.0,
         command_threshold: float = 1.0e-3,
+        push_event_name: str | None = None,
     ) -> torch.Tensor:
         vel_xy = self._asset.data.root_lin_vel_b.torch[:, :2]
         cmd_xy = env.command_manager.get_command(command_name)[:, :2]
@@ -144,7 +243,10 @@ class stand_still_drift(ManagerTermBase):
         self._standing = standing
 
         error = torch.sum(torch.square(self._filtered_vel), dim=-1)
-        return standing.float() * torch.exp(-error / std**2)
+        value = standing.float() * torch.exp(-error / std**2)
+        if push_event_name is not None:
+            value = value * (~_push_recovery_mask(env, push_event_name)).float()
+        return value
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         super().reset(env_ids)
@@ -160,6 +262,7 @@ def stand_init_pose_l1(
     gait_command_name: str | None = None,
     command_name: str | None = None,
     command_threshold: float = 1.0e-3,
+    push_event_name: str | None = None,
 ) -> torch.Tensor:
     """Reward standing environments for holding the initial joint pose with an L1 kernel.
 
@@ -179,6 +282,8 @@ def stand_init_pose_l1(
         command_name: Name of the velocity command term used as the standing gate.
         command_threshold: Full command norm (m/s and rad/s) below which the robot counts as
             standing.
+        push_event_name: Optional push event whose recovery mask disables the pose reward while
+            the robot is being shoved, so it can step instead of fighting back to the init pose.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     deviation = (
@@ -194,7 +299,10 @@ def stand_init_pose_l1(
         standing = (torch.norm(command, dim=-1) <= command_threshold).float()
     else:
         standing = torch.zeros(env.num_envs, device=env.device)
-    return standing * reward
+    value = standing * reward
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
+    return value
 
 
 def feet_gait(
@@ -253,7 +361,8 @@ def feet_stance(
     swing_center: float = 0.25,
     swing_period: float = 0.4,
     force_threshold: float = 5.0,
-    command_name=None,
+    command_name: str | None = None,
+    gait_command_name: str | None = None,
 ) -> torch.Tensor:
     """Reward feet for being planted during their expected stance phase.
 
@@ -262,7 +371,10 @@ def feet_stance(
     (swing) window, so a gait with a flight phase (both feet airborne) loses the support reward
     instead of getting the swing reward for free.
 
-    If the commands are small (i.e. the agent is not supposed to walk), then the reward is zero.
+    If ``command_name`` is given and the commanded velocity is small (i.e. the agent is not
+    supposed to translate), then the reward is zero. If ``gait_command_name`` is given, the reward
+    is additionally gated by the binary gait command, so a robot can walk in place while its
+    velocity command is zero.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     is_contact = (
@@ -289,6 +401,86 @@ def feet_stance(
     if command_name is not None:
         cmd_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
         reward *= cmd_norm > 1.0e-8
+    if gait_command_name is not None:
+        reward *= _gait_mode_mask(env, gait_command_name)
+    return reward
+
+
+def feet_step_length(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    target_offset: float = 0.04,
+    std: float = 0.02,
+    gait_command_name: str | None = None,
+) -> torch.Tensor:
+    """Reward each foot for landing ahead of the base and the other foot in the travel direction.
+
+    The term is evaluated on the first contact after a swing, when the foot placement is fixed.
+    The touchdown position, expressed in the base heading frame, is projected on the normalized
+    commanded planar velocity. A foot that lands ``target_offset`` ahead of the base in that
+    direction earns one; a foot that lands under or behind the body earns progressively less
+    through an exponential kernel.
+
+    The landing position is also compared with the *other* foot, which must end up at least
+    ``target_offset`` behind the landing foot along the same direction. Without the inter-foot
+    term a one-sided base placement is not enough: a leading leg can touch down far ahead while
+    the other leg only catches up to under the body, and both still satisfy the base criterion.
+    The same shortcut appears when walking backwards, where the base criterion alone does not
+    force the catch-up leg to pass the leading leg. Since both placements are compared along the
+    commanded direction, the term is symmetric for forward, backward, and sideways travel.
+
+    Without this term the gait rewards only constrain *when* a foot is airborne, not *where* it
+    lands, so a policy can keep one foot trailing and let the body travel over the planted foot
+    before the swing leg catches up. Requiring every landing to pass the planted foot makes taking
+    a real step cheaper than that split stance.
+
+    If ``gait_command_name`` is given, the term is additionally gated by the binary gait command.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    first_contact = contact_sensor.compute_first_contact(env.step_dt).torch[
+        :, sensor_cfg.body_ids
+    ]
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    foot_pos = asset.data.body_pos_w.torch[:, asset_cfg.body_ids, :2]
+    base_pos = asset.data.root_pos_w.torch[:, :2]
+    base_yaw = euler_xyz_from_quat(asset.data.root_quat_w.torch)[2]
+
+    # project an offset expressed in the world frame on the commanded travel direction
+    command = env.command_manager.get_command(command_name)
+    command_xy = command[:, :2]
+    command_norm = torch.norm(command_xy, dim=-1, keepdim=True)
+    direction = command_xy / torch.clamp(command_norm, min=1.0e-6)
+    cos_yaw = torch.cos(base_yaw).unsqueeze(1)
+    sin_yaw = torch.sin(base_yaw).unsqueeze(1)
+
+    def placement_along_command(
+        position: torch.Tensor, reference: torch.Tensor
+    ) -> torch.Tensor:
+        """Signed placement of ``position`` beyond ``reference`` in the travel direction."""
+        delta = position - reference
+        # base heading frame (yaw only, roll and pitch ignored)
+        forward = cos_yaw * delta[..., 0] + sin_yaw * delta[..., 1]
+        lateral = -sin_yaw * delta[..., 0] + cos_yaw * delta[..., 1]
+        return forward * direction[:, :1] + lateral * direction[:, 1:]
+
+    # touchdown placement relative to the base keeps the body centered between the feet
+    base_placement = placement_along_command(foot_pos, base_pos.unsqueeze(1))
+    # touchdown placement relative to the other foot requires a real step that passes it
+    other_foot_pos = foot_pos.flip(1)  # the bipedal asset has exactly two feet
+    foot_placement = placement_along_command(foot_pos, other_foot_pos)
+
+    shortfall = torch.clamp(target_offset - base_placement, min=0.0) + torch.clamp(
+        target_offset - foot_placement, min=0.0
+    )
+    reward = torch.sum(torch.exp(-shortfall / std) * first_contact.float(), dim=-1)
+
+    # a walk-in-place command has no travel direction to place the feet along
+    reward *= command_norm.squeeze(-1) > 1.0e-3
+    if gait_command_name is not None:
+        reward *= _gait_mode_mask(env, gait_command_name)
     return reward
 
 
@@ -429,6 +621,7 @@ def stand_feet_air(
     command_name: str | None = None,
     force_threshold: float = 1.0,
     command_threshold: float = 1.0e-3,
+    push_event_name: str | None = None,
 ) -> torch.Tensor:
     """Penalize airborne feet while the robot is commanded to stand still.
 
@@ -452,7 +645,10 @@ def stand_feet_air(
         standing = (torch.norm(command, dim=-1) <= command_threshold).float()
     else:
         standing = torch.zeros(env.num_envs, device=env.device)
-    return standing * (~is_contact).float().sum(dim=-1)
+    value = standing * (~is_contact).float().sum(dim=-1)
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
+    return value
 
 
 def feet_flat(
@@ -592,6 +788,7 @@ def feet_distance(
     target_distance: float = 0.25,
     command_name: str | None = None,
     full_gate_vel: float = 0.3,
+    push_event_name: str | None = None,
 ) -> torch.Tensor:
     """Penalize the left foot deviating from the target separation to the right foot.
 
@@ -619,4 +816,6 @@ def feet_distance(
         cmd_y = env.command_manager.get_command(command_name)[:, 1]
         gate = torch.clip(1.0 - torch.abs(cmd_y) / full_gate_vel, min=0.0, max=1.0)
         value = value * gate
+    if push_event_name is not None:
+        value = value * (~_push_recovery_mask(env, push_event_name)).float()
     return value

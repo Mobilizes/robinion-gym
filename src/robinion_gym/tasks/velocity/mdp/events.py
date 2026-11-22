@@ -337,6 +337,10 @@ class push_robot_by_force(ManagerTermBase):
         duration_s: Duration of the shove in seconds.
         push_interval_range_s: Time between consecutive pushes, sampled per environment.
         asset_cfg: The articulation the pushes are applied to.
+        recovery_s: Time after a push during which the recovery mask stays active. Tasks can
+            gate posture-shaping terms on the mask so the policy is allowed to step, brace, and
+            use its ankles while it recovers, instead of being pulled back into the standing pose
+            during the shove. Defaults to ``1.5``.
         debug_vis: Whether to draw the red force arrow. Defaults to False.
         marker_pos_offset: Offset [m] from the robot root where the force arrow is drawn.
             Defaults to ``(0.0, 0.0, 0.5)``.
@@ -350,6 +354,8 @@ class push_robot_by_force(ManagerTermBase):
         self._active = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         self._push_time_left = torch.zeros(env.num_envs, device=env.device)
         self._time_until_push = torch.zeros(env.num_envs, device=env.device)
+        # recovery window used by posture rewards to stop fighting the recovery step
+        self._recovery_time_left = torch.zeros(env.num_envs, device=env.device)
         self._sample_time_until_push(slice(None))
         # most recent push force per environment, kept for the persistent debug arrow
         self._last_force_w = torch.zeros(env.num_envs, 3, device=env.device)
@@ -362,6 +368,11 @@ class push_robot_by_force(ManagerTermBase):
             )
             self._force_visualizer.set_visibility(False)
 
+    @property
+    def recovery_mask(self) -> torch.Tensor:
+        """Per-environment mask that is true while a push recovery window is active."""
+        return self._recovery_time_left > 0.0
+
     def __call__(
         self,
         env: ManagerBasedEnv,
@@ -370,12 +381,17 @@ class push_robot_by_force(ManagerTermBase):
         duration_s: float,
         push_interval_range_s: tuple[float, float],
         asset_cfg: SceneEntityCfg,
+        recovery_s: float = 1.5,
         debug_vis: bool = False,
         marker_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.5),
         force_arrow_scale: float = 0.01,
     ) -> None:
         dt = env.step_dt
 
+        # In-place so an outer ``torch.inference_mode()`` does not turn the buffer into an
+        # inference tensor, which would reject the in-place reset update later.
+        self._recovery_time_left -= dt
+        self._recovery_time_left.clamp_(min=0.0)
         self._push_time_left[self._active] -= dt
         expired = self._active & (self._push_time_left <= 0.0)
         if expired.any():
@@ -400,6 +416,7 @@ class push_robot_by_force(ManagerTermBase):
             self._force_w[firing_ids, :, :2] = mass.unsqueeze(-1) * (delta_v / duration_s).unsqueeze(1)
             self._active[firing_ids] = True
             self._push_time_left[firing_ids] = duration_s
+            self._recovery_time_left[firing_ids] = recovery_s
             self._sample_time_until_push(firing_ids)
             self._write(firing_ids)
             # remember the new push for the persistent debug arrow
@@ -418,6 +435,7 @@ class push_robot_by_force(ManagerTermBase):
         env_ids = slice(None) if env_ids is None else env_ids
         self._active[env_ids] = False
         self._push_time_left[env_ids] = 0.0
+        self._recovery_time_left[env_ids] = 0.0
         self._force_w[env_ids] = 0.0
         self._last_force_w[env_ids] = 0.0
         self._show_arrow[env_ids] = False

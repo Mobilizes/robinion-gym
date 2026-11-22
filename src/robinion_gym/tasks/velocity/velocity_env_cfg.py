@@ -157,10 +157,10 @@ class CommandsCfg:
         debug_vis=True,
         gait_command_name="gait_mode",
         ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.4, 0.4), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.3, 0.3)
+            lin_vel_x=(-0.3, 0.3), lin_vel_y=(-0.15, 0.15), ang_vel_z=(-0.2, 0.2)
         ),
         limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-            lin_vel_x=(-0.8, 0.8), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.6, 0.6)
+            lin_vel_x=(-0.6, 0.6), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-0.4, 0.4)
         ),
     )
 
@@ -234,10 +234,11 @@ class ObservationsCfg:
 # Push strength (base velocity change, m/s) used in training: the curriculum ramps from no push up
 # to this range. The event default is kept on the same value so a rollout without the curriculum
 # (play mode, tests) never shoves the robot harder than the policy was trained for. With the ~8 kg
-# robot, 1 m/s over the 0.2 s push is about 40 N, matching the manual shove used in play_control.
+# robot, 0.4 m/s over the 0.2 s push is about 16 N. Note that play_control's manual push defaults
+# to 2.5 * mass = 0.5 m/s (about 20 N); pass --push-force 16 to reproduce the training shove.
 _PUSH_VELOCITY_RANGE: dict[str, tuple[float, float]] = {
-    "x": (-1.0, 1.0),
-    "y": (-1.0, 1.0),
+    "x": (-0.4, 0.4),
+    "y": (-0.4, 0.4),
 }
 
 
@@ -344,6 +345,9 @@ class EventCfg:
             "velocity_range": dict(_PUSH_VELOCITY_RANGE),
             "duration_s": 0.2,
             "push_interval_range_s": (4.0, 6.0),
+            # Posture terms read this window and switch off while the robot is being shoved and
+            # for a short settle period afterwards, so it can step instead of fighting the pose.
+            "recovery_s": 1.5,
             "debug_vis": True,
             "force_arrow_scale": 0.05,
         },
@@ -402,6 +406,7 @@ class RewardsCfg:
             "std": 0.05,
             "time_constant": 1.0,
             "asset_cfg": SceneEntityCfg("robot"),
+            "push_event_name": "push_robot",
         },
     )
 
@@ -417,6 +422,7 @@ class RewardsCfg:
             "gait_command_name": "gait_mode",
             "std": 0.5,
             "asset_cfg": SceneEntityCfg("robot"),
+            "push_event_name": "push_robot",
         },
     )
 
@@ -434,11 +440,11 @@ class RewardsCfg:
     #     },
     # )
 
-    rew_feet_flat = RewTerm(
-        func=mdp.feet_flat,
-        weight=1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
-    )
+    # rew_feet_flat = RewTerm(
+    #     func=mdp.feet_flat,
+    #     weight=1.0,
+    #     params={"asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*")},
+    # )
 
     # Make standing strictly cheaper than stepping while the mode is stand.
     pen_stand_feet_air = RewTerm(
@@ -447,6 +453,7 @@ class RewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
             "gait_command_name": "gait_mode",
+            "push_event_name": "push_robot",
         },
     )
 
@@ -473,18 +480,42 @@ class RewardsCfg:
         },
     )
 
-    # rew_feet_stance = RewTerm(
-    #     func=mdp.feet_stance,
-    #     weight=2.0,
-    #     params={
-    #         "period": 0.4,
-    #         "offset": [0.0, 0.5],
-    #         "swing_center": 0.25,
-    #         "swing_period": 0.4,
-    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
-    #         "command_name": "base_velocity",
-    #     },
-    # )
+    # The swing term alone only enforces *when* a foot is airborne, so a leg can stay up and
+    # trail behind while the other leg carries the body. Reward support-phase contact so a
+    # symmetric walk (one foot planted while the other swings, with double support) scores
+    # better than a running or split-stance gait.
+    rew_feet_stance = RewTerm(
+        func=mdp.feet_stance,
+        weight=2.0,
+        params={
+            "period": 0.4,
+            "offset": [0.0, 0.5],
+            "swing_center": 0.25,
+            "swing_period": 0.4,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+            "gait_command_name": "gait_mode",
+        },
+    )
+
+    # Reward the swing foot for planting ahead of the base AND past the other foot, which is what
+    # turns the trailing leg's "catch up" step into a real step that passes the leader. The
+    # base-relative placement alone is one-sided, so a leading leg could reach far out while the
+    # other only caught up under the body and both still scored full; this showed up as an
+    # asymmetric stride when walking backwards. The projection on the commanded direction makes
+    # the requirement identical for forward, backward, and sideways travel. A 0.04 m placement at
+    # 0.4 m/s over the 0.4 s cycle gives the ~0.08 m step spacing of a symmetric walk.
+    rew_feet_step_length = RewTerm(
+        func=mdp.feet_step_length,
+        weight=1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
+            "target_offset": 0.04,
+            "std": 0.02,
+            "command_name": "base_velocity",
+            "gait_command_name": "gait_mode",
+        },
+    )
 
     rew_feet_clearance = RewTerm(
         func=mdp.feet_clearance,
@@ -539,16 +570,18 @@ class RewardsCfg:
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
-            )
+            ),
+            "push_event_name": "push_robot",
         },
     )
     pen_ankle_vel = RewTerm(
-        func=mdp.joint_vel_l2,
+        func=mdp.joint_vel_l2_gated,
         weight=-0.01,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"]
-            )
+            ),
+            "push_event_name": "push_robot",
         },
     )
     # pen_arm_vel = RewTerm(
@@ -569,22 +602,27 @@ class RewardsCfg:
     #     params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_foot.*")},
     # )
     pen_joint_deviation_torso = RewTerm(
-        func=mdp.joint_deviation_l1,
+        func=mdp.joint_deviation_l1_gated,
         weight=-5.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names="torso_pitch_joint")},
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names="torso_pitch_joint"),
+            "push_event_name": "push_robot",
+        },
     )
     pen_arm_deviation = RewTerm(
         func=mdp.joint_deviation_l2,
         weight=-1.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*")
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*elbow.*|.*shoulder.*"),
+            "push_event_name": "push_robot",
         },
     )
     pen_arm_wide = RewTerm(
-        func=mdp.joint_deviation_l1,
+        func=mdp.joint_deviation_l1_gated,
         weight=-2.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_roll_joint")
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*shoulder_roll_joint"),
+            "push_event_name": "push_robot",
         },
     )
     pen_dof_joint_pos = RewTerm(func=mdp.joint_pos_limits, weight=-10.0)
@@ -594,11 +632,12 @@ class RewardsCfg:
     # Contact-rich randomization makes sliding and twisted foot placement much cheaper to exploit,
     # so these shaping terms are weighted above the original -1.0.
     pen_feet_slide = RewTerm(
-        func=mdp.feet_slide,
+        func=mdp.feet_slide_gated,
         weight=-3.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+            "push_event_name": "push_robot",
         },
     )
     pen_feet_yaw_diff = RewTerm(
@@ -626,9 +665,10 @@ class RewardsCfg:
         params={
             "left_foot_cfg": SceneEntityCfg("robot", body_names="left_foot.*"),
             "right_foot_cfg": SceneEntityCfg("robot", body_names="right_foot.*"),
-            "target_distance": 0.10,
+            "target_distance": 0.12,
             "command_name": "base_velocity",
             "full_gate_vel": 0.3,
+            "push_event_name": "push_robot",
         },
     )
 
@@ -679,20 +719,19 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    # Stage the push disturbance: the full shove arrives before a from-scratch policy can recover
-    # from it (every episode then ends at its first push), so start with no shove and ramp slowly
-    # to the trained range. The ramp is keyed on environment steps: 48 steps = 1 iteration, so
-    # 144000 steps is ~3000 iterations of unperturbed gait learning and 720000 steps is ~15000
-    # iterations to reach the full shove. This leaves ~5000 iterations at full strength inside the
-    # 20000-iteration budget. Progress is logged under "Curriculum/push_velocity_ramp".
+    # Stage the push disturbance: the full shove arrives before the policy can recover from it
+    # (every episode then ends at its first push), so start with no shove and ramp linearly to the
+    # trained range. The ramp is keyed on environment steps: 48 steps = 1 iteration, so 240000
+    # steps is ~5000 iterations to reach the full shove. Progress is logged under
+    # "Curriculum/push_velocity_ramp".
     push_velocity_ramp = CurrTerm(
         func=mdp.push_velocity_range_ramp,
         params={
             "event_name": "push_robot",
             "initial_range": {"x": (-0.0, 0.0), "y": (-0.0, 0.0)},
             "final_range": dict(_PUSH_VELOCITY_RANGE),
-            "start_step": 144000,
-            "end_step": 720000,
+            "start_step": 48000,
+            "end_step": 300000,
         },
     )
 
@@ -773,3 +812,26 @@ class RobinionWalkInPlaceEnvCfg(RobinionVelocityEnvCfg):
             lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(0.0, 0.0)
         )
         cmd.rel_standing_envs = 0.0
+
+
+@configclass
+class RobinionPushRecoveryEnvCfg(RobinionVelocityEnvCfg):
+    """Push-recovery fine-tune for 99% survival in stand and walk modes.
+
+    Play mode uses ``limit_ranges`` for velocity commands, so this variant trains at that same
+    envelope instead of relying on the level curriculum to reach it. The push is held at 0.5 m/s
+    (above the 0.4 m/s target) so the policy keeps a margin at the deployment strength. The base
+    configuration's posture terms are gated on the push recovery mask from the event term.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Train on the same command envelope that play mode uses. Assigning the same object also
+        # makes the level interpolation constant, so resuming cannot fall back to level 0.
+        self.commands.base_velocity.ranges = self.commands.base_velocity.limit_ranges
+        # Constant shove; the warm-start checkpoint already trained through 1.0 m/s.
+        self.curriculum.push_velocity_ramp = None
+        self.events.push_robot.params["velocity_range"] = {
+            "x": (-0.5, 0.5),
+            "y": (-0.5, 0.5),
+        }

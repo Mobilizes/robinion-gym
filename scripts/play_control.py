@@ -9,7 +9,7 @@ The script mirrors the ``isaaclab play`` workflow for the registered
 ``RobinionGym-Velocity-Robinion`` task, but forces ``num_envs=1`` and replaces the random
 velocity command generator with a teleoperation command built from live input:
 
-* Keyboard: ``W``/``S`` forward/back, ``A``/``D`` turn, ``Q``/``E`` strafe,
+* Keyboard: ``W``/``S`` forward/back, ``A``/``D`` strafe, ``Q``/``E`` turn,
   ``Space`` stop/stand, ``G`` toggle stand/walk, ``F`` shove the robot, ``R`` reset the robot.
 * Gamepad: left stick forward/strafe with analog strength, right stick turn with analog
   strength, ``B`` stop/stand, ``Y`` toggle stand/walk, ``A`` shove the robot, ``X`` reset the
@@ -20,12 +20,19 @@ walking and holds still until the toggle is pressed again. The stand/walk toggle
 switches the binary gait mode: walk mode with a zero velocity command walks in place, and stand
 mode forces the velocity command to zero and holds the init pose.
 
-Keyboard and gamepad can be used at the same time. Command changes are low-pass filtered so
-taps and stick motion do not step the policy, and the gamepad sticks use a radial deadzone.
+Keyboard and gamepad can be used at the same time. Command changes are low-pass filtered (0.05 s
+by default) so taps and stick motion do not step the policy, and the gamepad sticks use a radial
+deadzone. Releasing an axis snaps it to zero so the robot stops immediately instead of coasting on
+the filter tail. Pass ``--command-smoothing 0`` to send every input change to the policy
+immediately. Keyboard state is tracked from key events and cleared when the Kit window loses focus,
+so a key released in another window cannot leave the robot walking. Input is not gated on window
+focus, which keeps keyboard control working through remote-desktop and livestream clients.
 
 The playback loop prints the left-right foot separation every ``--feet-print-interval`` seconds:
 the signed lateral distance in the base heading frame, the full 3D distance, and the vertical
-difference between the feet. Set the interval to 0 to disable the printout.
+difference between the feet. Set the interval to 0 to disable the printout. Pass ``--debug-input``
+to print the polled keyboard state, normalized input, target, and filtered command every 0.1 s;
+use it to check whether both keys of a combination reach Kit.
 
 The manual shove applies a horizontal force to the robot for a short duration, with the
 direction fixed relative to the robot heading when the key/button is pressed. A red arrow
@@ -95,20 +102,25 @@ class InputState:
 
 
 class KeyboardGamepadInput:
-    """Poll the Isaac Sim keyboard and gamepad for SE(2) commands and edge-triggered actions.
+    """Read the Isaac Sim keyboard and gamepad for SE(2) commands and edge-triggered actions.
 
-    The devices are polled instead of driven by callbacks so a lost focus cannot leave a key
-    stuck down. Keyboard and gamepad contributions are summed and clamped, which allows using
-    both devices at the same time.
+    Keyboard state is tracked from key press/release events so a short tap cannot be missed. The
+    tracked state is cleared when the Kit window loses focus, which prevents a key whose key-up was
+    delivered to another window from staying latched down. Input is intentionally not gated on
+    window focus: remote-desktop and livestream clients deliver key events even when the server-side
+    window never reports OS focus. Gamepad state is polled. Keyboard and gamepad contributions are
+    summed and clamped, which allows using both devices at the same time.
     """
 
     _KEYBOARD_BINDINGS = {
         "forward": "W",
         "backward": "S",
-        "turn_left": "A",
-        "turn_right": "D",
-        "strafe_left": "Q",
-        "strafe_right": "E",
+        # WASD movement: A/D strafe like a standard first-person layout, while Q/E turn.
+        # This lets W+A move diagonally instead of replacing forward motion with a turn.
+        "strafe_left": "A",
+        "strafe_right": "D",
+        "turn_left": "Q",
+        "turn_right": "E",
         "toggle_stand": "SPACE",
         "toggle_gait": "G",
         "push": "F",
@@ -163,6 +175,25 @@ class KeyboardGamepadInput:
         self._prev_push = False
         self._prev_reset = False
 
+        # Track the pressed keys from the event stream. Polling the button flags is unreliable
+        # across focus changes, and remote-desktop/livestream clients can deliver key events while
+        # the server-side window still reports itself unfocused. Clearing the tracked set on focus
+        # loss prevents a key-up delivered to another window from leaving a key latched down.
+        self._keys_down: set = set()
+        self._keyboard_focused = bool(self._window.is_focused())
+        self._keyboard_sub = None
+        if self._keyboard is not None:
+            self._keyboard_sub = self._input.subscribe_to_keyboard_events(self._keyboard, self._on_keyboard_event)
+
+    def _on_keyboard_event(self, event) -> bool:
+        """Track pressed keys from the keyboard event stream."""
+        if event.type in (self._carb.KeyboardEventType.KEY_PRESS, self._carb.KeyboardEventType.KEY_REPEAT):
+            self._keys_down.add(event.input)
+        elif event.type == self._carb.KeyboardEventType.KEY_RELEASE:
+            self._keys_down.discard(event.input)
+        # Let Kit continue processing the event.
+        return True
+
     def _refresh_gamepad(self) -> None:
         """Look up the first connected gamepad."""
         try:
@@ -182,10 +213,36 @@ class KeyboardGamepadInput:
             if changed:
                 print(f"[INFO] Gamepad connected: {name}", flush=True)
 
-    def _key_down(self, name: str) -> bool:
-        """Return whether a bound keyboard key is held."""
+    def _raw_key_down(self, name: str) -> bool:
+        """Return whether the polled button flags report a bound key as held; debug only."""
         key = getattr(self._carb.KeyboardInput, self._KEYBOARD_BINDINGS[name])
         return bool(self._input.get_keyboard_button_flags(self._keyboard, key) & self._carb.BUTTON_FLAG_DOWN)
+
+    def _update_keyboard_focus(self) -> None:
+        """Clear the tracked keys when the Kit window loses focus.
+
+        A key-up delivered to another window never reaches Kit, so the tracked key would otherwise
+        stay down and keep the robot walking after release. Input is not gated on focus: remote
+        desktop and livestream clients can deliver key events while the server-side window never
+        reports OS focus.
+        """
+        if self._keyboard is None:
+            return
+        focused = bool(self._window.is_focused())
+        if self._keyboard_focused and not focused:
+            self._keys_down.clear()
+            # Drop latched edges so a toggle held during the focus change does not fire.
+            self._prev_toggle_stand = False
+            self._prev_toggle_gait = False
+            self._prev_push = False
+            self._prev_reset = False
+        self._keyboard_focused = focused
+
+    def _key_down(self, name: str) -> bool:
+        """Return whether a bound keyboard key is held."""
+        if self._keyboard is None:
+            return False
+        return getattr(self._carb.KeyboardInput, self._KEYBOARD_BINDINGS[name]) in self._keys_down
 
     def _gamepad_down(self, name: str) -> bool:
         """Return whether a gamepad button is held."""
@@ -250,7 +307,8 @@ class KeyboardGamepadInput:
         )
 
     def advance(self) -> InputState:
-        """Poll the devices and return one normalized command frame."""
+        """Read the devices and return one normalized command frame."""
+        self._update_keyboard_focus()
         if self._gamepad is None and self._mode in ("gamepad", "both"):
             self._refresh_gamepad()
 
@@ -279,6 +337,21 @@ class KeyboardGamepadInput:
             push=push,
             reset=reset,
         )
+
+    def debug_state(self) -> str:
+        """Return a compact snapshot of the raw device state for ``--debug-input``."""
+        if self._keyboard is None:
+            keyboard = "disabled"
+        else:
+            held = [name for name in self._KEYBOARD_BINDINGS if self._key_down(name)]
+            raw = [name for name in self._KEYBOARD_BINDINGS if self._raw_key_down(name)]
+            keyboard = (
+                f"window_focused={self._keyboard_focused} "
+                f"held={','.join(held) if held else '-'} "
+                f"raw={','.join(raw) if raw else '-'}"
+            )
+        gamepad = self._gamepad_name if self._gamepad is not None else "none"
+        return f"keyboard({keyboard}) gamepad({gamepad})"
 
 
 class ForcePusher:
@@ -534,6 +607,34 @@ def _apply_command(term, command: torch.Tensor) -> None:
     term.is_standing_env[0] = False
 
 
+def _use_policy_observation_groups(unwrapped, policy) -> None:
+    """Skip observation groups that the inference policy does not consume.
+
+    ``env.step`` computes every observation group, including the critic group that is only needed
+    for training. During playback the policy only reads its own groups, so dropping the others
+    removes work from the 200 Hz control loop without changing what the policy sees. Call this
+    after the runner and policy have been created, since they use the groups during setup.
+    """
+    group_names = getattr(policy, "obs_groups", None)
+    if not group_names:
+        return
+    if isinstance(group_names, str):
+        group_names = (group_names,)
+
+    observation_manager = unwrapped.observation_manager
+    active_groups = set(observation_manager.active_terms)
+    selected_groups = tuple(name for name in group_names if isinstance(name, str) and name in active_groups)
+    if not selected_groups or set(selected_groups) == active_groups:
+        return
+
+    def compute_policy_groups(update_history: bool = False):
+        return {
+            name: observation_manager.compute_group(name, update_history=update_history) for name in selected_groups
+        }
+
+    observation_manager.compute = compute_policy_groups
+
+
 def _run_playback(
     env: RslRlVecEnvWrapper,
     policy,
@@ -556,11 +657,18 @@ def _run_playback(
     smoothing = args_cli.command_smoothing
     num_steps = 0
     stand_mode = bool(args_cli.start_standing)
+    debug_every = max(1, round(0.1 / step_dt)) if args_cli.debug_input else 0
 
     # The play loop owns the command buffers. Preventing resampling keeps the velocity command
     # stable across the automatic reset that follows a fall and keeps the gait mode latched.
     command_term._resample_command = lambda env_ids: None
+    # The wrapper reset samples the training walk-in-place flag. Playback drives the command from
+    # input, so clear it; otherwise a sampled zero-velocity env would zero every command here.
+    command_term._zero_vel_env[:] = False
     _apply_command(command_term, command)
+
+    # Playback only needs the groups consumed by the inference policy, not the critic.
+    _use_policy_observation_groups(unwrapped, policy)
 
     gait_term = None
     if args_cli.gait_mode_term in unwrapped.command_manager.active_terms:
@@ -578,9 +686,11 @@ def _run_playback(
         "[INFO] Playback is running, press Space or gamepad B to stand, Ctrl+C to stop.",
         flush=True,
     )
+    loop_start = time.perf_counter()
+    real_time_warned = False
     try:
         while unwrapped.sim.is_running() and not unwrapped.sim.is_stopped():
-            step_start = time.time()
+            step_start = time.perf_counter()
             state = input_source.advance()
 
             if state.toggle_stand:
@@ -622,7 +732,20 @@ def _run_playback(
                 target = torch.tensor([state.lin_x, state.lin_y, state.ang_z], device=command.device) * limits
             alpha = 1.0 - math.exp(-step_dt / smoothing) if smoothing > 0.0 else 1.0
             command += alpha * (target - command)
+            # Stopping must not wait for the low-pass tail. Snap a released axis to zero so a
+            # key-up or a stick returning to its deadzone stops the robot immediately.
+            command[target == 0.0] = 0.0
             _apply_command(command_term, command)
+
+            if debug_every and num_steps % debug_every == 0:
+                print(
+                    f"[DBG] {input_source.debug_state()} "
+                    f"input=({state.lin_x:+.2f},{state.lin_y:+.2f},{state.ang_z:+.2f}) "
+                    f"stand={stand_mode} "
+                    f"target=({target[0]:+.2f},{target[1]:+.2f},{target[2]:+.2f}) "
+                    f"command=({command[0]:+.2f},{command[1]:+.2f},{command[2]:+.2f})",
+                    flush=True,
+                )
 
             if state.push and pusher.trigger():
                 print(
@@ -642,6 +765,17 @@ def _run_playback(
             pusher.update(step_dt)
 
             num_steps += 1
+            if args_cli.real_time and not real_time_warned and num_steps % 400 == 0:
+                wall_elapsed = time.perf_counter() - loop_start
+                sim_elapsed = num_steps * step_dt
+                if wall_elapsed > 1.15 * sim_elapsed:
+                    print(
+                        f"[WARN] Playback is running at {sim_elapsed / wall_elapsed:.2f}x real time; "
+                        "the robot will respond in slow motion. Raise --render-interval (for example "
+                        "16) or lower the render resolution to recover real time.",
+                        flush=True,
+                    )
+                    real_time_warned = True
             if feet_print_every and num_steps % feet_print_every == 0:
                 body_pos = robot.data.body_pos_w.torch[0]
                 left_pos = body_pos[left_foot_ids[0]]
@@ -658,7 +792,7 @@ def _run_playback(
             if args_cli.max_steps is not None and num_steps >= args_cli.max_steps:
                 break
             if args_cli.real_time:
-                sleep_time = step_dt - (time.time() - step_start)
+                sleep_time = step_dt - (time.perf_counter() - step_start)
                 if sleep_time > 0.0:
                     time.sleep(sleep_time)
     except KeyboardInterrupt:
@@ -753,14 +887,23 @@ def main() -> None:
     parser.add_argument(
         "--command-smoothing",
         type=float,
-        default=0.15,
-        help="Low-pass time constant for command changes in seconds; 0 disables smoothing.",
+        default=0.05,
+        help=(
+            "Low-pass time constant for command changes in seconds. Smaller is more responsive; "
+            "0 sends every change immediately."
+        ),
     )
     parser.add_argument(
         "--feet-print-interval",
         type=float,
         default=0.5,
         help=("Print the left-right foot separation every N seconds; 0 disables the printout."),
+    )
+    parser.add_argument(
+        "--debug-input",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=("Print the polled keyboard state, normalized input, target, and command every 0.1 s."),
     )
     parser.add_argument(
         "--max-lin-vel-x",
@@ -790,7 +933,10 @@ def main() -> None:
         "--render-interval",
         type=int,
         default=8,
-        help="Render every N physics steps (400 Hz physics); 0 keeps the task setting.",
+        help=(
+            "Render every N physics steps (400 Hz physics); 0 keeps the task setting. Raise this "
+            "if playback runs below real time."
+        ),
     )
     parser.add_argument(
         "--follow-camera",
@@ -885,14 +1031,19 @@ def main() -> None:
         env_cfg.viewer.asset_name = "robot"
         # Zoom in on the single robot. The task default (8 m back, 5 m up) frames a whole
         # training scene and leaves one robot too small to read its pose while driving it.
-        env_cfg.viewer.eye = (3.0, 0.0, 1.8)
-        env_cfg.viewer.lookat = (0.0, 0.0, 0.6)
+        env_cfg.viewer.eye = (3.0, 0.0, 1.4)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.3)
 
     # Play mode keeps the automatic push event at its trained strength. Replace it with the
     # manual push so the robot is only shoved when the user asks for it.
     events = getattr(env_cfg, "events", None)
     if events is not None and hasattr(events, "push_robot"):
         events.push_robot = None
+
+    # Playback never uses rewards. The task has ~30 reward terms and evaluating them every 5 ms
+    # costs more than the physics and observations together, which was enough to make the loop
+    # miss real time and turn every input into delayed slow-motion motion.
+    env_cfg.rewards = None
 
     task_name = args_cli.task.split(":")[-1]
     resume_path = _resolve_checkpoint(args_cli.checkpoint, task_name, agent_cfg, args_cli.agent)
@@ -923,7 +1074,7 @@ def main() -> None:
         )
 
         print(
-            "[INFO] Controls: W/S forward/back, A/D turn, Q/E strafe, G stand/walk, F push, R reset. "
+            "[INFO] Controls: W/S forward/back, A/D strafe, Q/E turn, G stand/walk, F push, R reset. "
             "Gamepad: left stick move, right stick turn, Y stand/walk, A push, X reset.",
             flush=True,
         )

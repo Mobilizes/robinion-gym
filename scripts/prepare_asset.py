@@ -14,7 +14,8 @@ of truth for the mechanics. The asset is generated in three steps:
 2. The handful of things the URDF cannot express are authored on the asset interface layer: the
    PhysX articulation root, the four parallelogram loops that tie the back thigh/shin bars to the
    knee/ankle links, and the flat box foot sole that replaces the narrow convex-hull contact of the
-   imported foot mesh.
+   imported foot mesh. Each loop joint also carries a stiff MuJoCo equality so MJWarp keeps the
+   pins closed under servo load.
 3. The composed asset is flattened into the single file the articulation spawner reads.
 
 The importer ships with Isaac Sim, so the project environment needs the ``isaacsim`` extra; no Isaac Sim
@@ -43,6 +44,15 @@ ASSET_STEM = "robonionv2"
 
 #: PhysX articulation root API; the importer only applies the backend-neutral and Newton ones.
 PHYSX_ARTICULATION_API = "PhysxArticulationAPI"
+
+#: MuJoCo's conversion of an excluded loop joint to an equality uses the solver defaults
+#: (``solref=[0.02, 1]`` and ``solimp`` with ``dmax=0.95``). That is soft enough for the light
+#: back-shin bar to separate from its ankle pin by ~2 cm under the ankle servo torque, which is
+#: visible in the viewport. The MuJoCo equality API carries a stiffer reference/impedance while
+#: the spherical joint remains the backend-neutral fallback.
+MJC_EQUALITY_CONNECT_API = "MjcEqualityConnectAPI"
+LOOP_EQUALITY_SOLREF = (0.002, 1.0)
+LOOP_EQUALITY_SOLIMP = (0.99, 0.999, 0.001, 0.5, 2.0)
 
 #: Foot collision shape. The URDF/imported foot collision mesh is a convex hull of a thin, rounded
 #: sole, so it touches the ground on a narrow strip. A flat box under the same link approximates the
@@ -239,6 +249,19 @@ def author_fixups(stage: Usd.Stage, foot_collision: str = "box") -> None:
         joint.CreateLocalRot0Attr().Set(Gf.Quatf(1.0))
         joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0))
         joint.CreateExcludeFromArticulationAttr().Set(True)
+
+        # MJWarp converts this joint to a CONNECT equality, and its default impedance is soft
+        # enough to open the pin visibly under servo load. Tag the joint with the MuJoCo equality
+        # schema and a stiffer reference/impedance. The schema is ignored by other backends, so
+        # the spherical joint above remains the portable representation of the loop.
+        joint_prim = joint.GetPrim()
+        prepend_api(joint_prim, MJC_EQUALITY_CONNECT_API)
+        joint_prim.CreateAttribute("mjc:solref", Sdf.ValueTypeNames.DoubleArray, custom=True).Set(
+            list(LOOP_EQUALITY_SOLREF)
+        )
+        joint_prim.CreateAttribute("mjc:solimp", Sdf.ValueTypeNames.DoubleArray, custom=True).Set(
+            list(LOOP_EQUALITY_SOLIMP)
+        )
 
 
 def flatten(stage: Usd.Stage, flattened_path: pathlib.Path) -> None:

@@ -101,8 +101,12 @@ can carry one sync read plus one sync write in the 5 ms policy period. See `../m
 ### Drive one robot with a keyboard or gamepad
 
 `scripts/play_control.py` runs a trained policy in exactly one environment and feeds the velocity command from live
-input instead of the random command generator. Command changes are smoothed, and the gamepad sticks keep their analog
-strength, so a partial stick deflection asks for a proportionally smaller velocity.
+input instead of the random command generator. Command changes are low-pass filtered with a 0.05 s time constant by
+default, and the gamepad sticks keep their analog strength, so a partial stick deflection asks for a proportionally
+smaller velocity. Releasing an axis stops it immediately instead of coasting on the filter tail. Keyboard state is
+tracked from key events and cleared when the Kit window loses focus, so a key released elsewhere cannot leave the
+robot walking. Input is not gated on window focus, which keeps keyboard control working through remote-desktop and
+livestream clients. Raise `--gamepad-deadzone` if a worn stick does not return to center.
 
 ```bash
 # Latest checkpoint; the script opens the Kit window because input needs it
@@ -121,8 +125,8 @@ Controls:
 | Input | Action |
 | --- | --- |
 | `W` / `S` | forward / backward velocity |
-| `A` / `D` | turn left / right |
-| `Q` / `E` | strafe left / right |
+| `A` / `D` | strafe left / right |
+| `Q` / `E` | turn left / right |
 | `Space` | stop walking and stand still (toggle) |
 | `G` | toggle stand / walk mode |
 | `F` | shove the robot |
@@ -159,7 +163,13 @@ robot is shoved only when you ask for it.
 script also sets `--episode-length-s` to effectively infinity by default, so only a fall or `R` resets the robot. Pass a
 smaller value to restore periodic time-out resets. The viewport follows the robot from a close third-person view by
 default; pass `--no-follow-camera` to free-orbit. Keyboard and gamepad both work at the same time; focus the Kit window
-for input to reach the simulation.
+for input to reach the simulation. Pass `--debug-input` to print the keyboard state (window focus, tracked and polled
+held bindings), normalized input, target, and filtered command every 0.1 s, which shows whether a key combination
+reaches Kit.
+
+Playback skips the task's reward terms because inference does not use them, which keeps the 200 Hz control loop close to
+real time. For the crispest response pass `--command-smoothing 0`. If the log warns that playback is running below real
+time, raise `--render-interval` to trade render smoothness for wall-clock speed.
 
 ### Stand, walk, or walk in place
 
@@ -167,9 +177,13 @@ The main `RobinionGym-Velocity-Robinion` task trains all three behaviors in one 
 `gait_mode` command is added to the command config and to both observation groups: `0` stands
 still and `1` walks. In stand mode the velocity command is forced to zero; in walk mode it is
 sampled as usual, and walk-mode environments with a zero command walk in place. The gait-shaping
-rewards (`feet_gait`, `feet_clearance`, `arm_swing_gait`) and the init-pose reward
-(`stand_init_pose_l1`) are gated on this bit, while `stand_still_drift` anchors the base against
-net drift and `stand_feet_air` makes standing strictly cheaper than stepping in stand mode.
+rewards (`feet_gait`, `feet_stance`, `feet_step_length`, `feet_clearance`, `arm_swing_gait`) and the
+init-pose reward (`stand_init_pose_l1`) are gated on this bit, while `stand_still_drift` anchors the
+base against net drift and `stand_feet_air` makes standing strictly cheaper than stepping in stand
+mode. `feet_stance` rewards support-phase contact and `feet_step_length` rewards planting each foot
+ahead of the base and past the other foot in the travel direction, which together prevent a
+one-leg-leading, one-leg-catching-up gait. Measuring the touchdown against the other foot (rather
+than only the base) keeps the requirement symmetric for forward and backward travel.
 
 Train from scratch:
 
@@ -216,6 +230,26 @@ mode:
 The mode and velocity commands are resampled every 10 s by default during training, so the
 policy sees mode changes within an episode. Lengthen `resampling_time_range` in
 `CommandsCfg.gait_mode` to keep one mode per episode.
+
+`RobinionGym-Velocity-Robinion-PushRecovery` is a fine-tuning variant for push survival. It
+trains at the full play command range with a constant ±0.5 m/s shove (above the ±0.4 m/s
+deployment target) and gates the stand posture, ankle, foot-slide, and arm shaping terms during
+a 1.5 s recovery window. Warm-start it from a walking checkpoint when the deployment shove is
+0.4–0.5 m/s:
+
+```bash
+./isaaclab.sh train --task RobinionGym-Velocity-Robinion-PushRecovery --num_envs 4096 \
+    --checkpoint logs/rsl_rl/robinion_velocity/2026-11-19_17-21-02/model_20000.pt
+```
+
+Use `scripts/pad_checkpoint_obs.py --std 0.3` (or set the actor's `distribution.std_param` to
+0.3) when the warm-start checkpoint is converged, so the policy can explore a recovery step.
+
+The `2026-11-21_00-47-51_push-recovery-0.5-std0.3` run reached **99.5% walk / 100% stand**
+survival at ±0.4 m/s over 30 s episodes with the full play command range. Its best checkpoint is
+`model_25000.pt`: the extra 5k iterations reduced walk survival slightly, so prefer the 25k
+checkpoint for play. At the manual push default of 0.5 m/s, walk survival is 98.4%; pass
+`--push-force 16` to test the 0.4 m/s target.
 
 ### Walk in the air with a real IMU in the observation space
 
